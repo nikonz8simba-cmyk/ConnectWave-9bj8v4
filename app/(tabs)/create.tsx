@@ -20,6 +20,7 @@ import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import * as Location from 'expo-location';
+import { Video as VideoCompressor } from 'react-native-compressor';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { Avatar } from '@/components/ui/Avatar';
 import { MentionInput } from '@/components/ui/MentionInput';
@@ -84,6 +85,8 @@ type UploadProgressInfo = {
   uploadedBytes: number;
   totalBytes: number;
 };
+
+type PublishPhase = 'idle' | 'compressing' | 'uploading' | 'saving';
 
 // ─── VideoPreview ─────────────────────────────────────────────────────────────
 // Uses expo-video with a static thumbnail fallback for content:// URIs on Android
@@ -306,25 +309,38 @@ async function uploadMedia(
   }
 }
 
-// ─── UploadProgressBar ────────────────────────────────────────────────────────
+// ─── PublishProgressBar ──────────────────────────────────────────────────────
+// Unified progress bar covering both compression and upload phases.
 
-function UploadProgressBar({
-  progress,
-  info,
+function PublishProgressBar({
+  phase,
+  compressProgress,
+  uploadProgress,
+  uploadInfo,
 }: {
-  progress: number;
-  info: UploadProgressInfo | null;
+  phase: PublishPhase;
+  compressProgress: number;
+  uploadProgress: number;
+  uploadInfo: UploadProgressInfo | null;
 }) {
   const fillAnim = useRef(new Animated.Value(0)).current;
 
+  // Map phase + progress → a single 0-100 value across the whole publish flow:
+  //   compressing → 0-45%   uploading → 45-95%   saving → 95-100%
+  const overallProgress =
+    phase === 'compressing' ? Math.round(compressProgress * 0.45)
+    : phase === 'uploading'  ? Math.round(45 + uploadProgress * 0.50)
+    : phase === 'saving'     ? 98
+    : 100;
+
   useEffect(() => {
     Animated.spring(fillAnim, {
-      toValue: progress,
+      toValue: overallProgress,
       useNativeDriver: false,
       tension: 40,
       friction: 8,
     }).start();
-  }, [progress]);
+  }, [overallProgress]);
 
   const fillWidth = fillAnim.interpolate({
     inputRange: [0, 100],
@@ -332,8 +348,16 @@ function UploadProgressBar({
     extrapolate: 'clamp',
   });
 
-  const isVideo = info !== null && info.totalBytes > 500 * 1024;
-  const barColor = isVideo ? Colors.info : Colors.primary;
+  const barColor =
+    phase === 'compressing' ? Colors.warning
+    : phase === 'uploading'  ? Colors.info
+    : Colors.primary;
+
+  const label =
+    phase === 'compressing' ? `Comprimiendo video... ${compressProgress}%`
+    : phase === 'uploading'  ? (uploadProgress < 100 ? 'Subiendo...' : 'Procesando...')
+    : phase === 'saving'     ? 'Guardando post...'
+    : 'Publicando...';
 
   return (
     <View style={progressStyles.container}>
@@ -346,26 +370,47 @@ function UploadProgressBar({
       <View style={progressStyles.infoRow}>
         <View style={progressStyles.infoLeft}>
           <ActivityIndicator size="small" color={barColor} style={progressStyles.spinner} />
-          <Text style={progressStyles.label}>
-            {progress < 100 ? 'Subiendo...' : 'Procesando...'}
-          </Text>
+          <Text style={[progressStyles.label, { color: barColor }]}>{label}</Text>
         </View>
-        {info && info.totalBytes > 0 ? (
-          <View style={progressStyles.infoRight}>
+        <View style={progressStyles.infoRight}>
+          {phase === 'uploading' && uploadInfo && uploadInfo.totalBytes > 0 ? (
             <Text style={[progressStyles.bytes, { color: Colors.textSecondary }]}>
-              {formatBytes(info.uploadedBytes)}
+              {formatBytes(uploadInfo.uploadedBytes)}
               <Text style={progressStyles.separator}> / </Text>
-              {formatBytes(info.totalBytes)}
+              {formatBytes(uploadInfo.totalBytes)}
             </Text>
-            <View style={[progressStyles.pctBadge, { backgroundColor: barColor + '22' }]}>
-              <Text style={[progressStyles.pct, { color: barColor }]}>{progress}%</Text>
-            </View>
-          </View>
-        ) : (
+          ) : null}
           <View style={[progressStyles.pctBadge, { backgroundColor: barColor + '22' }]}>
-            <Text style={[progressStyles.pct, { color: barColor }]}>{progress}%</Text>
+            <Text style={[progressStyles.pct, { color: barColor }]}>{overallProgress}%</Text>
           </View>
-        )}
+        </View>
+      </View>
+      {/* Phase indicators */}
+      <View style={progressStyles.phaseRow}>
+        {(['compressing', 'uploading', 'saving'] as PublishPhase[]).map((p, i) => {
+          const phases: PublishPhase[] = ['compressing', 'uploading', 'saving'];
+          const phaseIdx = phases.indexOf(phase);
+          const isActive = p === phase;
+          const isDone = phases.indexOf(p) < phaseIdx ||
+            (phase === 'saving' && p !== 'saving');
+          const phaseColor = isDone ? Colors.success : isActive ? barColor : Colors.surfaceBorder;
+          const phaseLabels = ['Comprimir', 'Subir', 'Guardar'];
+          return (
+            <View key={p} style={progressStyles.phaseItem}>
+              <View style={[progressStyles.phaseDot, { backgroundColor: phaseColor }]}>
+                {isDone ? (
+                  <Ionicons name="checkmark" size={8} color="#fff" />
+                ) : isActive ? (
+                  <View style={progressStyles.phaseDotActive} />
+                ) : null}
+              </View>
+              <Text style={[progressStyles.phaseLabel, isActive ? { color: barColor } : isDone ? { color: Colors.success } : null]}>
+                {phaseLabels[i]}
+              </Text>
+              {i < 2 ? <View style={[progressStyles.phaseConnector, { backgroundColor: isDone ? Colors.success : Colors.surfaceBorder }]} /> : null}
+            </View>
+          );
+        })}
       </View>
     </View>
   );
@@ -395,6 +440,44 @@ const progressStyles = StyleSheet.create({
   separator: { color: Colors.textMuted },
   pctBadge: { paddingHorizontal: 7, paddingVertical: 2, borderRadius: Radii.full },
   pct: { fontSize: FontSize.xs, fontWeight: FontWeight.bold },
+  // Phase step indicators
+  phaseRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.md,
+    paddingBottom: 8,
+    gap: 0,
+  },
+  phaseItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    flex: 1,
+  },
+  phaseDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  phaseDotActive: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#fff',
+  },
+  phaseLabel: {
+    fontSize: 9,
+    color: Colors.textMuted,
+    fontWeight: FontWeight.medium,
+  },
+  phaseConnector: {
+    flex: 1,
+    height: 1.5,
+    borderRadius: 1,
+    marginHorizontal: 2,
+  },
 });
 
 // ─── CharacterRing ────────────────────────────────────────────────────────────
@@ -605,6 +688,8 @@ export default function CreateScreen() {
   const [location, setLocation] = useState<LocationInfo | null>(null);
   const [locationLoading, setLocationLoading] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [publishPhase, setPublishPhase] = useState<PublishPhase>('idle');
+  const [compressProgress, setCompressProgress] = useState(0);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadProgressInfo, setUploadProgressInfo] = useState<UploadProgressInfo | null>(null);
   const [showAudience, setShowAudience] = useState(false);
@@ -640,6 +725,8 @@ export default function CreateScreen() {
     setActiveFilter('none');
     setAudience('public');
     setLocation(null);
+    setPublishPhase('idle');
+    setCompressProgress(0);
     setUploadProgress(0);
     setUploadProgressInfo(null);
   }, []);
@@ -781,6 +868,8 @@ export default function CreateScreen() {
     if (!profile?.id) return;
 
     setLoading(true);
+    setPublishPhase('idle');
+    setCompressProgress(0);
     setUploadProgress(0);
     setUploadProgressInfo(null);
 
@@ -788,8 +877,46 @@ export default function CreateScreen() {
     let videoUrl: string | undefined;
 
     if (media) {
+      let uploadAsset = media;
+
+      // ── Step 1: Compress video before upload ─────────────────────────
+      if (media.type === 'video') {
+        setPublishPhase('compressing');
+        setCompressProgress(0);
+        try {
+          console.log('[handlePublish] Starting video compression...');
+          const compressedUri = await VideoCompressor.compress(
+            media.uri,
+            {
+              compressionMethod: 'auto',
+              maxSize: 1280,           // max dimension (720p/1080p adaptive)
+              bitrate: 2_000_000,      // 2 Mbps → great quality, small size
+              minimumFileSizeForCompress: 5,  // compress anything > 5 MB
+            },
+            (progress) => {
+              // progress is 0–1
+              setCompressProgress(Math.round(progress * 100));
+            }
+          );
+          console.log('[handlePublish] Compression done:', compressedUri);
+          // Always force H.264/MP4 MIME after compression to prevent black screen on Android
+          uploadAsset = {
+            uri: compressedUri,
+            type: 'video',
+            mimeType: 'video/mp4',
+            thumbnailUri: media.thumbnailUri,
+          };
+        } catch (compressErr: any) {
+          console.warn('[handlePublish] Compression failed, uploading original:', compressErr?.message);
+          // Fallback: upload original uncompressed — don't block the user
+          uploadAsset = { ...media, mimeType: 'video/mp4' };
+        }
+      }
+
+      // ── Step 2: Upload to Supabase Storage ───────────────────────────
+      setPublishPhase('uploading');
       const { url, error: uploadError } = await uploadMedia(
-        media,
+        uploadAsset,
         profile.id,
         (info) => {
           setUploadProgress(info.percentage);
@@ -798,6 +925,8 @@ export default function CreateScreen() {
       );
       if (uploadError || !url) {
         setLoading(false);
+        setPublishPhase('idle');
+        setCompressProgress(0);
         setUploadProgress(0);
         setUploadProgressInfo(null);
         Alert.alert('Error al subir', uploadError ?? 'Error desconocido. Intenta de nuevo.');
@@ -810,6 +939,7 @@ export default function CreateScreen() {
       }
     }
 
+    setPublishPhase('saving');
     setUploadProgress(100);
 
     // Build final content: caption + mood tags + optional location footer
@@ -829,6 +959,7 @@ export default function CreateScreen() {
     setUploadProgress(0);
     setUploadProgressInfo(null);
 
+    setPublishPhase('idle');
     if (error) {
       Alert.alert('Error al publicar', error);
       return;
@@ -891,7 +1022,12 @@ export default function CreateScreen() {
 
         {/* ── Upload progress bar ──────────────────────────────────────────── */}
         {loading ? (
-          <UploadProgressBar progress={uploadProgress} info={uploadProgressInfo} />
+          <PublishProgressBar
+            phase={publishPhase}
+            compressProgress={compressProgress}
+            uploadProgress={uploadProgress}
+            uploadInfo={uploadProgressInfo}
+          />
         ) : null}
 
         {/* ── Content scroll ──────────────────────────────────────────────── */}
