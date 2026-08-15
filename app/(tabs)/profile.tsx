@@ -21,6 +21,7 @@ import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { Avatar } from '@/components/ui/Avatar';
+import { PostOptionsSheet } from '@/components/feature/PostOptionsSheet';
 import { useAuth } from '@/hooks/useAuth';
 import { signOut, updateUserProfile } from '@/services/authService';
 import { fetchUserPosts } from '@/services/postService';
@@ -238,39 +239,72 @@ function EditProfileModal({
 
 // ─── Grid Item ────────────────────────────────────────────────────────────────
 
-const GridItem = React.memo(function GridItem({ item }: { item: AppPost }) {
+interface GridItemProps {
+  item: AppPost;
+  isOwn: boolean;
+  currentUserId?: string;
+  onDeleted: (postId: string) => void;
+}
+
+const GridItem = React.memo(function GridItem({ item, isOwn, onDeleted }: GridItemProps) {
+  const [optionsOpen, setOptionsOpen] = useState(false);
+
   return (
-    <Pressable
-      style={({ pressed }) => [styles.gridItem, pressed ? { opacity: 0.8 } : null]}
-    >
-      {item.media_type === 'video' && item.video_url ? (
-        <View style={styles.gridItemInner}>
+    <>
+      <Pressable
+        style={({ pressed }) => [styles.gridItem, pressed ? { opacity: 0.8 } : null]}
+        onLongPress={() => isOwn ? setOptionsOpen(true) : undefined}
+        delayLongPress={350}
+      >
+        {item.media_type === 'video' && item.video_url ? (
+          <View style={styles.gridItemInner}>
+            <Image
+              source={{ uri: `https://picsum.photos/seed/${item.id}/200/200` }}
+              style={styles.gridImage}
+              contentFit="cover"
+              transition={200}
+            />
+            <View style={styles.gridBadge}>
+              <Ionicons name="videocam" size={11} color="#fff" />
+            </View>
+          </View>
+        ) : item.image_url ? (
           <Image
-            source={{ uri: `https://picsum.photos/seed/${item.id}/200/200` }}
+            source={{ uri: item.image_url }}
             style={styles.gridImage}
             contentFit="cover"
             transition={200}
           />
-          <View style={styles.gridBadge}>
-            <Ionicons name="videocam" size={11} color="#fff" />
+        ) : (
+          <View style={[styles.gridImage, styles.gridTextItem]}>
+            <Text style={styles.gridTextContent} numberOfLines={5}>{item.content}</Text>
           </View>
-        </View>
-      ) : item.image_url ? (
-        <Image
-          source={{ uri: item.image_url }}
-          style={styles.gridImage}
-          contentFit="cover"
-          transition={200}
-        />
-      ) : (
-        <View style={[styles.gridImage, styles.gridTextItem]}>
-          <Text style={styles.gridTextContent} numberOfLines={5}>{item.content}</Text>
-        </View>
-      )}
-      {item.liked ? (
-        <View style={styles.gridLikedDot} />
-      ) : null}
-    </Pressable>
+        )}
+        {item.liked ? (
+          <View style={styles.gridLikedDot} />
+        ) : null}
+        {isOwn ? (
+          <Pressable
+            style={styles.gridMoreBtn}
+            onPress={() => setOptionsOpen(true)}
+            hitSlop={4}
+          >
+            <Ionicons name="ellipsis-vertical" size={13} color="#fff" />
+          </Pressable>
+        ) : null}
+      </Pressable>
+
+      <PostOptionsSheet
+        visible={optionsOpen}
+        post={item}
+        isOwn={isOwn}
+        onClose={() => setOptionsOpen(false)}
+        onDeleted={(postId) => {
+          setOptionsOpen(false);
+          onDeleted(postId);
+        }}
+      />
+    </>
   );
 });
 
@@ -305,6 +339,10 @@ export default function ProfileScreen() {
     await Promise.all([refreshProfile?.(), loadUserPosts()]);
     setRefreshing(false);
   }, [refreshProfile, loadUserPosts]);
+
+  const handlePostDeleted = useCallback((postId: string) => {
+    setUserPosts(prev => prev.filter(p => p.id !== postId));
+  }, []);
 
   // Tabs: posts / liked / media
   const likedPosts = userPosts.filter(p => p.liked);
@@ -587,7 +625,14 @@ export default function ProfileScreen() {
             <FlatList
               data={activeData}
               keyExtractor={item => item.id}
-              renderItem={({ item }) => <GridItem item={item} />}
+              renderItem={({ item }) => (
+                <GridItem
+                  item={item}
+                  isOwn={item.user.id === user?.id}
+                  currentUserId={user?.id}
+                  onDeleted={handlePostDeleted}
+                />
+              )}
               numColumns={3}
               scrollEnabled={false}
               columnWrapperStyle={styles.gridRow}
@@ -797,6 +842,17 @@ const styles = StyleSheet.create({
     height: 7,
     borderRadius: 3.5,
     backgroundColor: Colors.error,
+  },
+  gridMoreBtn: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 
   // Grid states

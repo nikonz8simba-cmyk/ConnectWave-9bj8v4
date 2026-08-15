@@ -321,6 +321,7 @@ export default function FeedScreen() {
     loadMorePosts,
     loadingMorePosts,
     hasMorePosts,
+    removePost,
   } = useApp();
 
   const [activeFilter, setActiveFilter] = useState<FilterCategory>('Todo');
@@ -363,8 +364,10 @@ export default function FeedScreen() {
   });
 
   const renderPost = useCallback(
-    ({ item }: { item: AppPost }) => <PostCard post={item} onLike={toggleLike} />,
-    [toggleLike]
+    ({ item }: { item: AppPost }) => (
+      <PostCard post={item} onLike={toggleLike} onDeleted={removePost} />
+    ),
+    [toggleLike, removePost]
   );
 
   const keyExtractor = useCallback((item: AppPost) => item.id, []);

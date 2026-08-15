@@ -25,6 +25,7 @@ interface AppContextType {
   addPost: (content: string, imageUrl?: string, videoUrl?: string) => Promise<{ error: string | null }>;
   updateConversationOptimistic: (conversationId: string, updates: Partial<AppConversation>) => void;
   markConversationRead: (conversationId: string) => void;
+  removePost: (postId: string) => void;
 }
 
 export const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -268,6 +269,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [user]
   );
 
+  const removePost = useCallback((postId: string) => {
+    setPosts(prev => prev.filter(p => p.id !== postId));
+    setFeedOffset(prev => Math.max(0, prev - 1));
+  }, []);
+
   const updateConversationOptimistic = useCallback(
     (conversationId: string, updates: Partial<AppConversation>) => {
       setConversations(prev =>
@@ -302,6 +308,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         addPost,
         updateConversationOptimistic,
         markConversationRead,
+        removePost,
       }}
     >
       {children}
