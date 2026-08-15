@@ -122,6 +122,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
           const liked = likeRow != null;
           const profile = data.user_profiles as DbUserProfile;
 
+          const now = new Date();
+          const datePart = now.toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' });
+          const timePart = now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: false });
+
           const appPost: AppPost = {
             id: data.id,
             user: mapDbProfileToAppUser(profile),
@@ -135,6 +139,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             created_at: data.created_at,
             liked,
             timestamp: 'ahora',
+            datetime: `${datePart}, ${timePart}`,
           };
 
           setPosts(prev => {
