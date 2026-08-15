@@ -89,22 +89,25 @@ type UploadProgressInfo = {
 // Uses expo-video with a static thumbnail fallback for content:// URIs on Android
 // where the player may fail to initialise before the stream is ready.
 
+// On Android, nativeControls=true is required to properly initialise the
+// SurfaceView render path. Without it the video surface shows black.
+const PREVIEW_USE_NATIVE = Platform.OS === 'android';
+
 function VideoPreview({ uri, thumbnailUri }: { uri: string; thumbnailUri?: string }) {
-  const [playerReady, setPlayerReady] = useState(false);
   const [playerError, setPlayerError] = useState(false);
 
   const player = useVideoPlayer(uri, p => {
     p.loop = true;
-    p.muted = true;
+    // Start unmuted on Android (native controls expose volume), muted on iOS/web
+    p.muted = !PREVIEW_USE_NATIVE;
     try {
       p.play();
-      setPlayerReady(true);
     } catch {
       setPlayerError(true);
     }
   });
 
-  // If the player has an error or hasn't loaded, show thumbnail / placeholder
+  // If the player has an error, show thumbnail / placeholder fallback
   if (playerError) {
     return (
       <View style={[styles.mediaPreviewImage, videoPreviewStyles.fallback]}>
@@ -128,7 +131,11 @@ function VideoPreview({ uri, thumbnailUri }: { uri: string; thumbnailUri?: strin
       player={player}
       style={styles.mediaPreviewImage}
       contentFit="cover"
-      nativeControls={false}
+      // Android: nativeControls=true forces SurfaceView to render correctly
+      // and provides built-in volume control.
+      // iOS/web: nativeControls=false keeps the clean preview appearance.
+      nativeControls={PREVIEW_USE_NATIVE}
+      allowsFullscreen={false}
     />
   );
 }

@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { View, Text, StyleSheet, Pressable, Animated, Share } from 'react-native';
+import { View, Text, StyleSheet, Pressable, Animated, Share, Platform } from 'react-native';
 import { Image } from 'expo-image';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
@@ -32,9 +32,18 @@ function formatVideoTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-// ─────────────────────────────────────────────
-// VideoPost — inline video player with seek bar
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// VideoPost — inline video player
+//
+// Android SurfaceView limitation:
+//   expo-video renders via a hardware-accelerated SurfaceView on Android.
+//   SurfaceViews exist in a separate z-layer BELOW the regular View hierarchy,
+//   so any absoluteFill overlay causes the video surface to appear black.
+//   Fix: on Android, delegate all controls to nativeControls=true (which also
+//   provides a native volume slider). On iOS/web we keep our custom seek bar.
+// ─────────────────────────────────────────────────────────────────────────────
+const IS_ANDROID = Platform.OS === 'android';
+
 function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(true);
@@ -45,7 +54,9 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
 
   const player = useVideoPlayer(uri, p => {
     p.loop = true;
-    p.muted = true;
+    // On Android we let native controls manage mute; start unmuted so the
+    // user can hear audio immediately (matching typical Android video UX).
+    p.muted = IS_ANDROID ? false : true;
   });
 
   // React to autoPlay changes (viewability-driven)
@@ -58,9 +69,9 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
     }
   }, [autoPlay]);
 
-  // Poll currentTime + duration at 4fps while playing
+  // Poll currentTime + duration at 4fps while playing (iOS/web custom controls)
   useEffect(() => {
-    if (!playing) return;
+    if (IS_ANDROID || !playing) return;
     const interval = setInterval(() => {
       try {
         const ct = player.currentTime ?? 0;
@@ -72,8 +83,9 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
     return () => clearInterval(interval);
   }, [playing, player]);
 
-  // Grab duration once when paused / on mount
+  // Grab duration once on mount (iOS/web)
   useEffect(() => {
+    if (IS_ANDROID) return;
     const timer = setTimeout(() => {
       try {
         const dur = player.duration ?? 0;
@@ -83,8 +95,9 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
     return () => clearTimeout(timer);
   }, [player]);
 
-  // Animate seek bar fill smoothly
+  // Animate seek bar fill (iOS/web only)
   useEffect(() => {
+    if (IS_ANDROID) return;
     const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
     Animated.timing(progressAnim, {
       toValue: progress,
@@ -127,6 +140,24 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
     outputRange: ['0%', '100%'],
   });
 
+  // ── Android: delegate everything to native controls ────────────────────────
+  // nativeControls=true forces Android to properly initialise the SurfaceView
+  // render path AND provides a built-in volume slider + scrubber.
+  if (IS_ANDROID) {
+    return (
+      <View style={styles.videoWrapper}>
+        <VideoView
+          player={player}
+          style={styles.postVideo}
+          contentFit="cover"
+          nativeControls={true}
+          allowsFullscreen={false}
+        />
+      </View>
+    );
+  }
+
+  // ── iOS / Web: custom seek bar + play/pause overlay ───────────────────────
   return (
     <View style={styles.videoWrapper}>
       <VideoView
@@ -134,9 +165,10 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
         style={styles.postVideo}
         contentFit="cover"
         nativeControls={false}
+        allowsFullscreen={false}
       />
 
-      {/* Tap anywhere on video (except seek bar area) to play/pause */}
+      {/* Tap area (above seek bar) to play/pause */}
       <Pressable
         style={[StyleSheet.absoluteFill, { bottom: 44 }]}
         onPress={togglePlay}
@@ -150,26 +182,20 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
         ) : null}
       </Pressable>
 
-      {/* ── Bottom gradient + seek bar ── */}
+      {/* ── Bottom seek bar ── */}
       <View style={styles.seekBarArea} pointerEvents="box-none">
-        {/* Time labels row */}
         <View style={styles.videoTimeRow}>
           <Text style={styles.videoTimeText}>{formatVideoTime(currentTime)}</Text>
           <Text style={styles.videoTimeText}>{formatVideoTime(duration)}</Text>
         </View>
-
-        {/* Seek track — tappable */}
         <Pressable
           style={styles.seekBarTrack}
           onPress={handleSeek}
           onLayout={e => { seekBarWidthRef.current = e.nativeEvent.layout.width; }}
           hitSlop={{ top: 10, bottom: 10 }}
         >
-          {/* Background track */}
           <View style={styles.seekBarBg} />
-          {/* Filled portion */}
           <Animated.View style={[styles.seekBarFill, { width: fillWidth as any }]} />
-          {/* Thumb dot — positioned via interpolated left */}
           <Animated.View
             style={[
               styles.seekBarThumb,
@@ -184,7 +210,7 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
         </Pressable>
       </View>
 
-      {/* Mute button — moved to top-right to avoid overlap with seek bar */}
+      {/* Mute button — top-right */}
       <Pressable style={styles.muteBtn} onPress={toggleMute} hitSlop={8}>
         <Ionicons
           name={muted ? 'volume-mute' : 'volume-high'}
