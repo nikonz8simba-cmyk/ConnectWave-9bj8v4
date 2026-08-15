@@ -29,8 +29,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   const loadProfile = useCallback(async (userId: string) => {
-    const p = await fetchUserProfile(userId);
-    setProfile(p);
+    try {
+      const p = await fetchUserProfile(userId);
+      setProfile(p);
+    } catch {
+      // Profile fetch failed — don't block the app
+    }
   }, []);
 
   const refreshProfile = useCallback(async () => {
@@ -52,7 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (_event, s) => {
+      async (event, s) => {
         setSession(s);
         setUser(s?.user ?? null);
         if (s?.user) {
@@ -60,6 +64,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         } else {
           setProfile(null);
         }
+        // Always clear loading after auth state resolves
+        setLoading(false);
       }
     );
     return () => subscription.unsubscribe();

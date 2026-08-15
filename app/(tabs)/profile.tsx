@@ -279,10 +279,27 @@ export default function ProfileScreen() {
     await refreshProfile?.();
   };
 
-  if (loading || !profile) {
+  // Still initialising — show spinner only briefly
+  if (loading) {
     return (
       <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
         <ActivityIndicator color={Colors.primary} size="large" />
+      </View>
+    );
+  }
+
+  // Auth done but profile failed to load — offer a retry
+  if (!profile) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center', gap: Spacing.md }]}>
+        <Ionicons name="person-circle-outline" size={64} color={Colors.textMuted} />
+        <Text style={{ color: Colors.textSecondary, fontSize: FontSize.base }}>No se pudo cargar el perfil</Text>
+        <Pressable
+          style={{ backgroundColor: Colors.primary, paddingHorizontal: Spacing.lg, paddingVertical: Spacing.sm, borderRadius: Radii.full }}
+          onPress={() => refreshProfile?.()}
+        >
+          <Text style={{ color: '#fff', fontWeight: FontWeight.semibold }}>Reintentar</Text>
+        </Pressable>
       </View>
     );
   }
