@@ -21,7 +21,7 @@ import { useApp } from '@/hooks/useApp';
 import { useAuth } from '@/hooks/useAuth';
 import { Colors, Spacing, FontSize, FontWeight, Radii } from '@/constants/theme';
 import { AppPost } from '@/types/database';
-import { MOCK_STORIES } from '@/constants/mockData';
+
 
 // ─── Filter configuration ────────────────────────────────────────────────────
 
@@ -372,7 +372,7 @@ export default function FeedScreen() {
   const ListHeaderComponent = useCallback(
     () => (
       <View>
-        <StoryBar stories={MOCK_STORIES} />
+        <StoryBar />
         {/* Filter chips row */}
         <ScrollView
           horizontal

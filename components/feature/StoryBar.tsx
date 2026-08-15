@@ -1,19 +1,48 @@
-import React, { useState } from 'react';
-import { View, Text, ScrollView, Pressable, StyleSheet } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View, Text, ScrollView, Pressable, StyleSheet, ActivityIndicator } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Avatar } from '@/components/ui/Avatar';
-import { Colors, Spacing, FontSize, FontWeight, Radii } from '@/constants/theme';
-import { Story, CURRENT_USER } from '@/constants/mockData';
+import { Colors, Spacing, FontSize, FontWeight } from '@/constants/theme';
+import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/hooks/useAuth';
+import { AppUser, DbUserProfile } from '@/types/database';
+import { mapDbProfileToAppUser } from '@/services/authService';
 
-interface StoryBarProps {
-  stories: Story[];
-}
+// ─── StoryBar ─────────────────────────────────────────────────────────────────
+// Shows the current user's "add story" button + recently active real users.
+// Data is fetched from user_profiles; no mock data is used.
 
-export function StoryBar({ stories }: StoryBarProps) {
-  const [seenStories, setSeenStories] = useState<Set<string>>(new Set());
+export function StoryBar() {
+  const { user, profile } = useAuth();
+  const [recentUsers, setRecentUsers] = useState<AppUser[]>([]);
+  const [seenIds, setSeenIds] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!user?.id) return;
+
+    const load = async () => {
+      setLoading(true);
+      // Fetch other users ordered by most recently updated (proxy for activity),
+      // excluding the current user, up to 12 entries.
+      const { data, error } = await supabase
+        .from('user_profiles')
+        .select('id, username, name, avatar, bio, verified, posts_count, followers_count, following_count, email, created_at, updated_at')
+        .neq('id', user.id)
+        .order('updated_at', { ascending: false })
+        .limit(12);
+
+      if (!error && data) {
+        setRecentUsers((data as DbUserProfile[]).map(mapDbProfileToAppUser));
+      }
+      setLoading(false);
+    };
+
+    load();
+  }, [user?.id]);
 
   const handleStoryPress = (id: string) => {
-    setSeenStories(prev => new Set([...prev, id]));
+    setSeenIds(prev => new Set([...prev, id]));
   };
 
   return (
@@ -23,10 +52,10 @@ export function StoryBar({ stories }: StoryBarProps) {
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.content}
       >
-        {/* My Story */}
+        {/* ── My Story (current user) ─────────────────────────────────── */}
         <Pressable style={styles.storyItem}>
           <View style={styles.myStoryWrapper}>
-            <Avatar uri={CURRENT_USER.avatar} size={56} />
+            <Avatar uri={profile?.avatar ?? 'https://i.pravatar.cc/150?img=7'} size={56} />
             <LinearGradient
               colors={[Colors.primary, Colors.secondary]}
               style={styles.addBadge}
@@ -39,41 +68,57 @@ export function StoryBar({ stories }: StoryBarProps) {
           <Text style={styles.storyName} numberOfLines={1}>Tu historia</Text>
         </Pressable>
 
-        {/* Other Stories */}
-        {stories.map(story => {
-          const seen = seenStories.has(story.id) || story.seen;
-          return (
-            <Pressable
-              key={story.id}
-              style={styles.storyItem}
-              onPress={() => handleStoryPress(story.id)}
-            >
-              <View style={styles.storyRingWrapper}>
-                {!seen ? (
-                  <LinearGradient
-                    colors={[Colors.primary, Colors.secondary]}
-                    style={[styles.storyRing]}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 1 }}
-                  >
-                    <View style={styles.storyInner}>
-                      <Avatar uri={story.user.avatar} size={50} />
-                    </View>
-                  </LinearGradient>
-                ) : (
-                  <View style={[styles.storyRing, { borderColor: Colors.textMuted }]}>
-                    <View style={styles.storyInner}>
-                      <Avatar uri={story.user.avatar} size={50} />
-                    </View>
-                  </View>
-                )}
+        {/* ── Other real users ────────────────────────────────────────── */}
+        {loading ? (
+          // Skeleton placeholders while loading
+          [1, 2, 3, 4].map(i => (
+            <View key={i} style={styles.storyItem}>
+              <View style={[styles.storyRing, styles.skeletonRing]}>
+                <View style={styles.skeletonAvatar} />
               </View>
-              <Text style={styles.storyName} numberOfLines={1}>
-                {story.user.name.split(' ')[0]}
-              </Text>
-            </Pressable>
-          );
-        })}
+              <View style={styles.skeletonName} />
+            </View>
+          ))
+        ) : recentUsers.length === 0 ? (
+          <View style={styles.emptyHint}>
+            <Text style={styles.emptyText}>Invita amigos{'\n'}para ver sus historias</Text>
+          </View>
+        ) : (
+          recentUsers.map(u => {
+            const seen = seenIds.has(u.id);
+            return (
+              <Pressable
+                key={u.id}
+                style={styles.storyItem}
+                onPress={() => handleStoryPress(u.id)}
+              >
+                <View style={styles.storyRingWrapper}>
+                  {!seen ? (
+                    <LinearGradient
+                      colors={[Colors.primary, Colors.secondary]}
+                      style={styles.storyRing}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                    >
+                      <View style={styles.storyInner}>
+                        <Avatar uri={u.avatar} size={50} />
+                      </View>
+                    </LinearGradient>
+                  ) : (
+                    <View style={[styles.storyRing, styles.seenRing]}>
+                      <View style={styles.storyInner}>
+                        <Avatar uri={u.avatar} size={50} />
+                      </View>
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.storyName} numberOfLines={1}>
+                  {(u.name || u.username).split(' ')[0]}
+                </Text>
+              </Pressable>
+            );
+          })
+        )}
       </ScrollView>
     </View>
   );
@@ -132,6 +177,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  seenRing: {
+    borderColor: Colors.textMuted,
+  },
   storyInner: {
     width: 56,
     height: 56,
@@ -146,5 +194,36 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     fontWeight: FontWeight.medium,
     textAlign: 'center',
+  },
+  // Skeleton
+  skeletonRing: {
+    backgroundColor: Colors.surfaceElevated,
+    borderColor: 'transparent',
+  },
+  skeletonAvatar: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: Colors.surfaceBorder,
+  },
+  skeletonName: {
+    height: 10,
+    width: 44,
+    borderRadius: 5,
+    backgroundColor: Colors.surfaceElevated,
+  },
+  // Empty hint
+  emptyHint: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.xs,
+    opacity: 0.55,
+  },
+  emptyText: {
+    fontSize: FontSize.xs,
+    color: Colors.textMuted,
+    textAlign: 'center',
+    lineHeight: 16,
   },
 });

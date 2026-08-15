@@ -1,6 +1,6 @@
 import React, { createContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { useAuthContext } from '@/contexts/AuthContext';
-import { AppPost, AppConversation } from '@/types/database';
+import { AppPost, AppConversation, DbPost, DbUserProfile } from '@/types/database';
 import {
   fetchDiscoveryFeed,
   togglePostLike,
@@ -8,6 +8,7 @@ import {
 } from '@/services/postService';
 import { fetchConversations } from '@/services/chatService';
 import { supabase } from '@/lib/supabase';
+import { mapDbProfileToAppUser } from '@/services/authService';
 
 interface AppContextType {
   posts: AppPost[];
@@ -38,6 +39,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [feedOffset, setFeedOffset] = useState(0);
   const [loadingChats, setLoadingChats] = useState(false);
   const realtimeChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const postsChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   // ── Feed ───────────────────────────────────────────────────────────────
 
@@ -76,12 +78,111 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setLoadingChats(false);
   }, [user]);
 
-  // ── Real-time: listen for new/updated messages, refresh conversation list ─
+  // ── Real-time: new posts INSERT → prepend to feed ──────────────────────
 
   useEffect(() => {
     if (!user?.id) return;
 
-    // Clean up previous channel
+    if (postsChannelRef.current) {
+      supabase.removeChannel(postsChannelRef.current);
+    }
+
+    const channel = supabase
+      .channel(`feed_posts_${user.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'posts',
+        },
+        async (payload) => {
+          const newRow = payload.new as DbPost & { user_id: string };
+
+          // Skip own posts (already added optimistically via addPost)
+          if (newRow.user_id === user.id) return;
+
+          // Fetch the full post with user profile attached
+          const { data } = await supabase
+            .from('posts')
+            .select('*, user_profiles(*)')
+            .eq('id', newRow.id)
+            .single();
+
+          if (!data) return;
+
+          // Check if current user has liked this post
+          const { data: likeRow } = await supabase
+            .from('post_likes')
+            .select('post_id')
+            .eq('post_id', newRow.id)
+            .eq('user_id', user.id)
+            .maybeSingle();
+
+          const liked = likeRow != null;
+          const profile = data.user_profiles as DbUserProfile;
+
+          const appPost: AppPost = {
+            id: data.id,
+            user: mapDbProfileToAppUser(profile),
+            content: data.content,
+            image_url: data.image_url ?? null,
+            video_url: data.video_url ?? null,
+            media_type: data.media_type ?? 'text',
+            likes_count: data.likes_count,
+            comments_count: data.comments_count,
+            shares_count: data.shares_count,
+            created_at: data.created_at,
+            liked,
+            timestamp: 'ahora',
+          };
+
+          setPosts(prev => {
+            // Avoid duplicates
+            if (prev.some(p => p.id === appPost.id)) return prev;
+            return [appPost, ...prev];
+          });
+          setFeedOffset(prev => prev + 1);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'posts',
+        },
+        (payload) => {
+          const updated = payload.new as DbPost;
+          setPosts(prev =>
+            prev.map(p =>
+              p.id === updated.id
+                ? {
+                    ...p,
+                    likes_count: updated.likes_count,
+                    comments_count: updated.comments_count,
+                    shares_count: updated.shares_count,
+                  }
+                : p
+            )
+          );
+        }
+      )
+      .subscribe();
+
+    postsChannelRef.current = channel;
+
+    return () => {
+      supabase.removeChannel(channel);
+      postsChannelRef.current = null;
+    };
+  }, [user?.id]);
+
+  // ── Real-time: messages → refresh conversation list ────────────────────
+
+  useEffect(() => {
+    if (!user?.id) return;
+
     if (realtimeChannelRef.current) {
       supabase.removeChannel(realtimeChannelRef.current);
     }
@@ -90,26 +191,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       .channel(`app_messages_${user.id}`)
       .on(
         'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'messages',
-        },
-        () => {
-          // Refresh conversations to update last message + unread counts
-          refreshConversations();
-        }
+        { event: 'INSERT', schema: 'public', table: 'messages' },
+        () => { refreshConversations(); }
       )
       .on(
         'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'messages',
-        },
-        () => {
-          refreshConversations();
-        }
+        { event: 'UPDATE', schema: 'public', table: 'messages' },
+        () => { refreshConversations(); }
       )
       .subscribe();
 
