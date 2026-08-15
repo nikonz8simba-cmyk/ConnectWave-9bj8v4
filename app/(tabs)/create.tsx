@@ -18,6 +18,7 @@ import { Ionicons, MaterialIcons, MaterialCommunityIcons } from '@expo/vector-ic
 import { LinearGradient } from 'expo-linear-gradient';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { Avatar } from '@/components/ui/Avatar';
 import { MentionInput } from '@/components/ui/MentionInput';
@@ -88,41 +89,96 @@ function VideoPreview({ uri }: { uri: string }) {
 }
 
 // ─── Upload helper ────────────────────────────────────────────────────────────
+// Architecture note:
+// - Web: fetch() + blob works correctly.
+// - Native images: fetch() + FileReader works for small-to-medium files.
+// - Native videos: fetch() on a content:// or file:// URI can produce an
+//   empty/truncated ArrayBuffer for large files. We must use
+//   expo-file-system readAsStringAsync (base64) and decode manually to
+//   guarantee the full byte sequence reaches Supabase Storage.
+
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
 
 async function uploadMedia(
   asset: MediaAsset,
   userId: string
 ): Promise<{ url: string | null; error: string | null }> {
   try {
-    const ext = asset.mimeType?.split('/')[1] ?? (asset.type === 'video' ? 'mp4' : 'jpg');
+    // Derive extension: prefer mimeType, fall back per media type.
+    // Handle QuickTime .mov → store as mp4-compatible key.
+    const rawExt = asset.mimeType?.split('/')[1];
+    const ext = rawExt === 'quicktime' ? 'mov' : rawExt ?? (asset.type === 'video' ? 'mp4' : 'jpg');
     const fileName = `${userId}/${Date.now()}.${ext}`;
     const mimeType = asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg');
 
+    console.log('[uploadMedia] Starting upload:', { uri: asset.uri, mimeType, fileName });
+
     if (Platform.OS === 'web') {
+      // Web: standard fetch + blob path.
       const response = await fetch(asset.uri);
       const blob = await response.blob();
+      console.log('[uploadMedia] Web blob size:', blob.size);
       const { error } = await supabase.storage
         .from('posts-media')
         .upload(fileName, blob, { contentType: mimeType, upsert: false });
-      if (error) return { url: null, error: error.message };
+      if (error) {
+        console.error('[uploadMedia] Supabase error (web):', error.message, (error as any).details);
+        return { url: null, error: error.message };
+      }
+    } else if (asset.type === 'video') {
+      // Native video: use expo-file-system to read as base64 to avoid
+      // fetch() truncation on large content:// or file:// URIs.
+      console.log('[uploadMedia] Native video — using FileSystem.readAsStringAsync');
+      const base64 = await FileSystem.readAsStringAsync(asset.uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      console.log('[uploadMedia] Base64 length:', base64.length);
+      const uint8Array = base64ToUint8Array(base64);
+      console.log('[uploadMedia] Uint8Array byte length:', uint8Array.byteLength);
+      const { error } = await supabase.storage
+        .from('posts-media')
+        .upload(fileName, uint8Array, { contentType: mimeType, upsert: false });
+      if (error) {
+        console.error('[uploadMedia] Supabase error (native video):', error.message, (error as any).details);
+        return { url: null, error: error.message };
+      }
     } else {
+      // Native image: fetch + FileReader path (reliable for images).
       const response = await fetch(asset.uri);
       const blob = await response.blob();
+      console.log('[uploadMedia] Native image blob size:', blob.size);
       const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result as ArrayBuffer);
-        reader.onerror = reject;
+        reader.onerror = (e) => {
+          console.error('[uploadMedia] FileReader error:', e);
+          reject(e);
+        };
         reader.readAsArrayBuffer(blob);
       });
+      console.log('[uploadMedia] ArrayBuffer byte length:', arrayBuffer.byteLength);
       const { error } = await supabase.storage
         .from('posts-media')
         .upload(fileName, arrayBuffer, { contentType: mimeType, upsert: false });
-      if (error) return { url: null, error: error.message };
+      if (error) {
+        console.error('[uploadMedia] Supabase error (native image):', error.message, (error as any).details);
+        return { url: null, error: error.message };
+      }
     }
 
     const { data } = supabase.storage.from('posts-media').getPublicUrl(fileName);
+    console.log('[uploadMedia] Upload successful:', data.publicUrl);
     return { url: data.publicUrl, error: null };
   } catch (e: any) {
+    console.error('[uploadMedia] Unexpected exception:', e);
     return { url: null, error: e?.message ?? 'Upload failed' };
   }
 }
@@ -251,10 +307,12 @@ const filterStyles = StyleSheet.create({
 function MediaPickerButtons({
   onCamera,
   onGallery,
+  onPickVideo,
   hasMedia,
 }: {
   onCamera: () => void;
   onGallery: () => void;
+  onPickVideo: () => void;
   hasMedia: boolean;
 }) {
   return (
@@ -287,7 +345,7 @@ function MediaPickerButtons({
 
       <Pressable
         style={({ pressed }) => [pickerStyles.btn, pressed ? pickerStyles.btnPressed : null]}
-        onPress={onGallery}
+        onPress={onPickVideo}
       >
         <LinearGradient
           colors={['rgba(56,189,248,0.15)', 'rgba(56,189,248,0.07)']}
@@ -389,47 +447,56 @@ export default function CreateScreen() {
     setAudience('public');
   };
 
-  const pickMedia = useCallback(async (source: 'camera' | 'gallery') => {
+  const pickMedia = useCallback(async (source: 'camera' | 'gallery', forceVideo = false) => {
     if (source === 'camera') {
       const { status } = await ImagePicker.requestCameraPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permiso requerido', 'Necesitamos acceso a tu cámara.');
+        Alert.alert('Permiso requerido', 'Necesitamos acceso a tu cámara para grabar videos y fotos.');
         return;
       }
       const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ['images', 'videos'],
+        mediaTypes: forceVideo ? ['videos'] : ['images', 'videos'],
         allowsEditing: true,
         quality: 0.85,
         videoMaxDuration: 60,
+        videoQuality: ImagePicker.UIImagePickerControllerQualityType.Medium,
       });
       if (!result.canceled && result.assets[0]) {
         const asset = result.assets[0];
-        setMedia({
-          uri: asset.uri,
-          type: asset.type === 'video' ? 'video' : 'image',
-          mimeType: asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg'),
-        });
+        const detectedType = asset.type === 'video' ? 'video' : 'image';
+        // Resolve mimeType: expo-image-picker sometimes returns undefined for videos.
+        // For .mov files we keep the correct quicktime type so the upload extension is right.
+        const mimeType = asset.mimeType
+          ?? (detectedType === 'video' ? 'video/mp4' : 'image/jpeg');
+        console.log('[pickMedia] camera asset:', { uri: asset.uri, type: detectedType, mimeType });
+        setMedia({ uri: asset.uri, type: detectedType, mimeType });
         setActiveFilter('none');
       }
     } else {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permiso requerido', 'Necesitamos acceso a tu galería.');
+        Alert.alert(
+          'Permiso requerido',
+          'Necesitamos acceso a tu galería para seleccionar fotos y videos.'
+        );
         return;
       }
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images', 'videos'],
+        // When forceVideo is true we restrict to videos only so the picker
+        // title and filter shows "Videos" correctly on both platforms.
+        mediaTypes: forceVideo ? ['videos'] : ['images', 'videos'],
         allowsEditing: true,
         quality: 0.85,
         videoMaxDuration: 60,
+        videoQuality: ImagePicker.UIImagePickerControllerQualityType.Medium,
       });
       if (!result.canceled && result.assets[0]) {
         const asset = result.assets[0];
-        setMedia({
-          uri: asset.uri,
-          type: asset.type === 'video' ? 'video' : 'image',
-          mimeType: asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg'),
-        });
+        const detectedType = asset.type === 'video' ? 'video' : 'image';
+        const mimeType = asset.mimeType
+          ?? (detectedType === 'video' ? 'video/mp4' : 'image/jpeg');
+        console.log('[pickMedia] gallery asset:', { uri: asset.uri, type: detectedType, mimeType });
+        setMedia({ uri: asset.uri, type: detectedType, mimeType });
         setActiveFilter('none');
       }
     }
@@ -797,6 +864,7 @@ export default function CreateScreen() {
           <MediaPickerButtons
             onCamera={() => pickMedia('camera')}
             onGallery={() => pickMedia('gallery')}
+            onPickVideo={() => pickMedia('gallery', true)}
             hasMedia={media != null}
           />
           {/* Character counter row */}

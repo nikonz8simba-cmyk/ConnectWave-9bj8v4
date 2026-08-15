@@ -26,6 +26,14 @@
     "plugins": [
       "expo-router",
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "ConnectWave necesita acceso a tu galería para subir fotos y videos.",
+          "cameraPermission": "ConnectWave necesita acceso a tu cámara para capturar fotos y videos.",
+          "microphonePermission": "ConnectWave necesita acceso al micrófono para grabar videos con sonido."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "image": "./assets/images/logo.png",
