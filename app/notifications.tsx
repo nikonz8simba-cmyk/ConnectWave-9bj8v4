@@ -15,6 +15,7 @@ import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Avatar } from '@/components/ui/Avatar';
 import { useAuth } from '@/hooks/useAuth';
+import { useApp } from '@/hooks/useApp';
 import { fetchNotifications, AppNotification } from '@/services/notificationService';
 import { Colors, Spacing, FontSize, FontWeight, Radii } from '@/constants/theme';
 
@@ -304,6 +305,7 @@ export default function NotificationsScreen() {
   const router = useRouter();
   const { user } = useAuth();
 
+  const { markNotificationsRead } = useApp();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -318,6 +320,11 @@ export default function NotificationsScreen() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Mark all as read in the global counter as soon as the screen mounts
+  useEffect(() => {
+    markNotificationsRead();
+  }, [markNotificationsRead]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);

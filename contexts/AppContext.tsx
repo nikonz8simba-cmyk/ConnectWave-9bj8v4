@@ -1,4 +1,4 @@
-import React, { createContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
+import React, { createContext, useState, useEffect, useCallback, useRef, ReactNode, useMemo } from 'react';
 import { useAuthContext } from '@/contexts/AuthContext';
 import { AppPost, AppConversation, DbPost, DbUserProfile } from '@/types/database';
 import {
@@ -6,6 +6,7 @@ import {
   togglePostLike,
   createPost as createPostService,
 } from '@/services/postService';
+import { fetchNotifications } from '@/services/notificationService';
 import { fetchConversations } from '@/services/chatService';
 import { supabase } from '@/lib/supabase';
 import { mapDbProfileToAppUser } from '@/services/authService';
@@ -26,6 +27,8 @@ interface AppContextType {
   updateConversationOptimistic: (conversationId: string, updates: Partial<AppConversation>) => void;
   markConversationRead: (conversationId: string) => void;
   removePost: (postId: string) => void;
+  unreadNotifCount: number;
+  markNotificationsRead: () => void;
 }
 
 export const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -39,6 +42,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [hasMorePosts, setHasMorePosts] = useState(true);
   const [feedOffset, setFeedOffset] = useState(0);
   const [loadingChats, setLoadingChats] = useState(false);
+  const [unreadNotifCount, setUnreadNotifCount] = useState(0);
   const realtimeChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const postsChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
@@ -215,15 +219,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, [user?.id, refreshConversations]);
 
+  // ── Notifications unread count ────────────────────────────────────────
+
+  const refreshNotifCount = useCallback(async () => {
+    if (!user?.id) return;
+    const data = await fetchNotifications(user.id);
+    setUnreadNotifCount(data.length);
+  }, [user?.id]);
+
+  const markNotificationsRead = useCallback(() => {
+    setUnreadNotifCount(0);
+  }, []);
+
   // ── Bootstrap ──────────────────────────────────────────────────────────
 
   useEffect(() => {
     if (user?.id) {
       refreshPosts();
       refreshConversations();
+      refreshNotifCount();
     } else {
       setPosts([]);
       setConversations([]);
+      setUnreadNotifCount(0);
     }
   }, [user?.id]);
 
@@ -269,6 +287,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [user]
   );
 
+  // Realtime: refresh notif count when someone likes/comments on our posts
+  useEffect(() => {
+    if (!user?.id) return;
+    const channel = supabase
+      .channel(`notif_trigger_${user.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'post_likes' },
+        () => { refreshNotifCount(); }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'post_comments' },
+        () => { refreshNotifCount(); }
+      )
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [user?.id, refreshNotifCount]);
+
   const removePost = useCallback((postId: string) => {
     setPosts(prev => prev.filter(p => p.id !== postId));
     setFeedOffset(prev => Math.max(0, prev - 1));
@@ -309,6 +346,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         updateConversationOptimistic,
         markConversationRead,
         removePost,
+        unreadNotifCount,
+        markNotificationsRead,
       }}
     >
       {children}

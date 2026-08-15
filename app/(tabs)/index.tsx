@@ -322,6 +322,7 @@ export default function FeedScreen() {
     loadingMorePosts,
     hasMorePosts,
     removePost,
+    unreadNotifCount,
   } = useApp();
 
   const [activeFilter, setActiveFilter] = useState<FilterCategory>('Todo');
@@ -476,8 +477,7 @@ export default function FeedScreen() {
           <Pressable style={styles.iconBtn} hitSlop={8} onPress={() => router.push('/notifications' as any)}>
             <View>
               <Ionicons name="notifications-outline" size={22} color={Colors.textSecondary} />
-              {/* Notification dot */}
-              <View style={styles.notifDot} />
+              {unreadNotifCount > 0 ? <View style={styles.notifDot} /> : null}
             </View>
           </Pressable>
         </View>
