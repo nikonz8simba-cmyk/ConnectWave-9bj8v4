@@ -147,6 +147,13 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
   // Fix: use a plain View WITHOUT overflow:hidden / borderRadius on Android,
   // and use nativeControls=true which forces the SurfaceView to initialise.
   if (IS_ANDROID) {
+    // On Android, VideoView uses a SurfaceView which renders in a hardware
+    // layer BELOW the React Native view hierarchy. Any ancestor with
+    // elevation + borderRadius causes implicit overflow clipping that makes
+    // the surface appear black (audio still plays). The videoWrapperAndroid
+    // style intentionally has NO borderRadius, NO overflow:hidden, and NO
+    // elevation — the parent card's elevation is the problem so this wrapper
+    // needs negative horizontal margins to "escape" the card padding.
     return (
       <View style={styles.videoWrapperAndroid}>
         <VideoView
@@ -388,7 +395,15 @@ const styles = StyleSheet.create({
     padding: Spacing.md,
     borderWidth: 1,
     borderColor: Colors.surfaceBorder,
-    ...Shadows.card,
+    // NOTE: Shadows.card includes elevation:6. On Android, elevation+borderRadius
+    // causes implicit overflow clipping that makes VideoView (SurfaceView) appear
+    // black. We keep the iOS shadow props but use elevation:0 on Android so the
+    // SurfaceView can render unclipped.
+    shadowColor: Shadows.card.shadowColor,
+    shadowOffset: Shadows.card.shadowOffset,
+    shadowOpacity: Shadows.card.shadowOpacity,
+    shadowRadius: Shadows.card.shadowRadius,
+    elevation: Platform.OS === 'android' ? 0 : Shadows.card.elevation,
   },
   header: { flexDirection: 'row', alignItems: 'center', marginBottom: Spacing.sm },
   headerInfo: { flex: 1, marginLeft: Spacing.sm },
@@ -435,13 +450,17 @@ const styles = StyleSheet.create({
     position: 'relative',
     backgroundColor: '#000',
   },
-  // Android: NO overflow:hidden / borderRadius — SurfaceView is a hardware
-  // layer that renders below RN views and ignores those CSS-style properties.
+  // Android: SurfaceView renders in a separate hardware z-layer below the
+  // React Native hierarchy. elevation + borderRadius on any ANCESTOR causes
+  // implicit overflow clipping → black surface while audio still plays.
+  // Fix: negative horizontal margins escape the card's padding so the
+  // VideoView sits flush with the card edges, and we use NO overflow/radius.
   videoWrapperAndroid: {
     marginBottom: Spacing.sm,
+    marginHorizontal: -Spacing.md,   // cancel card's padding: Spacing.md
     height: 280,
-    position: 'relative',
     backgroundColor: '#000',
+    // NO borderRadius, NO overflow:'hidden', NO elevation
   },
   postVideo: { width: '100%', height: '100%' },
   playOverlay: {
