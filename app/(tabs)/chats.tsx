@@ -1,23 +1,50 @@
-import React, { useCallback } from 'react';
-import { View, Text, FlatList, StyleSheet, Pressable, TextInput } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import {
+  View,
+  Text,
+  FlatList,
+  StyleSheet,
+  Pressable,
+  TextInput,
+  ActivityIndicator,
+  RefreshControl,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { Avatar } from '@/components/ui/Avatar';
 import { ChatListItem } from '@/components/feature/ChatListItem';
 import { useApp } from '@/hooks/useApp';
 import { Colors, Spacing, FontSize, FontWeight, Radii } from '@/constants/theme';
-import { Conversation } from '@/constants/mockData';
+import { AppConversation } from '@/types/database';
 
 export default function ChatsScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { conversations } = useApp();
+  const { conversations, loadingChats, refreshConversations } = useApp();
+  const [search, setSearch] = useState('');
+
+  const filteredConversations = search.trim()
+    ? conversations.filter(c =>
+        c.other_user.name.toLowerCase().includes(search.toLowerCase()) ||
+        c.other_user.username.toLowerCase().includes(search.toLowerCase())
+      )
+    : conversations;
+
+  const onlineConversations = conversations.filter(c => c.online);
 
   const handlePress = useCallback(
-    (conversation: Conversation) => {
+    (conversation: AppConversation) => {
       router.push(`/chat/${conversation.id}`);
     },
     [router]
+  );
+
+  const renderItem = useCallback(
+    ({ item }: { item: AppConversation }) => (
+      <ChatListItem conversation={item} onPress={() => handlePress(item)} />
+    ),
+    [handlePress]
   );
 
   return (
@@ -37,44 +64,69 @@ export default function ChatsScreen() {
           style={styles.searchInput}
           placeholder="Buscar conversaciones..."
           placeholderTextColor={Colors.textMuted}
+          value={search}
+          onChangeText={setSearch}
         />
+        {search.length > 0 ? (
+          <Pressable onPress={() => setSearch('')} hitSlop={8}>
+            <Ionicons name="close-circle" size={18} color={Colors.textMuted} />
+          </Pressable>
+        ) : null}
       </View>
 
       {/* Online contacts strip */}
-      <View style={styles.onlineSection}>
-        <Text style={styles.onlineSectionTitle}>En linea</Text>
-        <View style={styles.onlineDots}>
-          {conversations.filter(c => c.online).map(c => (
-            <Pressable
-              key={c.id}
-              style={styles.onlineAvatar}
-              onPress={() => handlePress(c)}
-            >
-              <View style={styles.onlineRing}>
-                <View style={styles.onlineAvatarInner}>
-                  {/* Simple colored circle as avatar placeholder */}
-                </View>
-              </View>
-              <Text style={styles.onlineAvatarName} numberOfLines={1}>
-                {c.user.name.split(' ')[0]}
-              </Text>
-            </Pressable>
-          ))}
+      {onlineConversations.length > 0 ? (
+        <View style={styles.onlineSection}>
+          <Text style={styles.onlineSectionTitle}>En linea</Text>
+          <View style={styles.onlineDots}>
+            {onlineConversations.map(c => (
+              <Pressable
+                key={c.id}
+                style={styles.onlineAvatar}
+                onPress={() => handlePress(c)}
+              >
+                <Avatar uri={c.other_user.avatar} size={46} online />
+                <Text style={styles.onlineAvatarName} numberOfLines={1}>
+                  {c.other_user.name.split(' ')[0]}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
         </View>
-      </View>
+      ) : null}
 
-      <Text style={styles.sectionLabel}>Recientes</Text>
+      <Text style={styles.sectionLabel}>
+        {search.trim() ? `Resultados (${filteredConversations.length})` : 'Recientes'}
+      </Text>
 
       <FlatList
-        data={conversations}
+        data={filteredConversations}
         keyExtractor={item => item.id}
-        renderItem={({ item }) => (
-          <ChatListItem conversation={item} onPress={() => handlePress(item)} />
-        )}
+        renderItem={renderItem}
         showsVerticalScrollIndicator={false}
-        ItemSeparatorComponent={() => (
-          <View style={styles.separator} />
-        )}
+        ItemSeparatorComponent={() => <View style={styles.separator} />}
+        ListEmptyComponent={
+          <View style={styles.emptyState}>
+            {loadingChats ? (
+              <ActivityIndicator color={Colors.primary} />
+            ) : (
+              <>
+                <Ionicons name="chatbubbles-outline" size={40} color={Colors.textMuted} />
+                <Text style={styles.emptyText}>
+                  {search.trim() ? 'Sin resultados' : 'No tienes conversaciones aun'}
+                </Text>
+              </>
+            )}
+          </View>
+        }
+        refreshControl={
+          <RefreshControl
+            refreshing={loadingChats}
+            onRefresh={refreshConversations}
+            tintColor={Colors.primary}
+            colors={[Colors.primary]}
+          />
+        }
       />
     </View>
   );
@@ -112,6 +164,8 @@ const styles = StyleSheet.create({
     borderRadius: Radii.full,
     paddingHorizontal: Spacing.md,
     height: 42,
+    borderWidth: 1,
+    borderColor: Colors.surfaceBorder,
   },
   searchIcon: {
     marginRight: 8,
@@ -136,27 +190,11 @@ const styles = StyleSheet.create({
   onlineDots: {
     flexDirection: 'row',
     gap: Spacing.md,
+    flexWrap: 'wrap',
   },
   onlineAvatar: {
     alignItems: 'center',
     gap: 4,
-  },
-  onlineRing: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    borderWidth: 2,
-    borderColor: Colors.success,
-    backgroundColor: Colors.surfaceElevated,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  onlineAvatarInner: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: Colors.primary,
-    opacity: 0.6,
   },
   onlineAvatarName: {
     fontSize: FontSize.xs,
@@ -175,5 +213,14 @@ const styles = StyleSheet.create({
     height: 1,
     backgroundColor: Colors.surfaceBorder,
     marginLeft: 80,
+  },
+  emptyState: {
+    alignItems: 'center',
+    paddingVertical: Spacing.xxl,
+    gap: Spacing.sm,
+  },
+  emptyText: {
+    color: Colors.textMuted,
+    fontSize: FontSize.base,
   },
 });

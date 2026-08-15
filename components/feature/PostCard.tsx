@@ -4,10 +4,10 @@ import { Image } from 'expo-image';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import { Avatar } from '@/components/ui/Avatar';
 import { Colors, Spacing, Radii, FontSize, FontWeight, Shadows } from '@/constants/theme';
-import { Post } from '@/constants/mockData';
+import { AppPost } from '@/types/database';
 
 interface PostCardProps {
-  post: Post;
+  post: AppPost;
   onLike: (id: string) => void;
 }
 
@@ -50,19 +50,11 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
       {/* Content */}
       <Text style={styles.content}>{post.content}</Text>
 
-      {post.tags && post.tags.length > 0 ? (
-        <View style={styles.tagsRow}>
-          {post.tags.map(tag => (
-            <Text key={tag} style={styles.tag}>#{tag}</Text>
-          ))}
-        </View>
-      ) : null}
-
       {/* Image */}
-      {post.image ? (
+      {post.image_url ? (
         <View style={styles.imageWrapper}>
           <Image
-            source={{ uri: post.image }}
+            source={{ uri: post.image_url }}
             style={styles.postImage}
             contentFit="cover"
             transition={300}
@@ -81,18 +73,18 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
             />
           </Animated.View>
           <Text style={[styles.actionCount, post.liked ? styles.likedCount : null]}>
-            {formatCount(post.likes)}
+            {formatCount(post.likes_count)}
           </Text>
         </Pressable>
 
         <Pressable style={styles.actionBtn} onPress={() => setCommentExpanded(v => !v)} hitSlop={8}>
           <Ionicons name="chatbubble-outline" size={20} color={Colors.textSecondary} />
-          <Text style={styles.actionCount}>{formatCount(post.comments)}</Text>
+          <Text style={styles.actionCount}>{formatCount(post.comments_count)}</Text>
         </Pressable>
 
         <Pressable style={styles.actionBtn} hitSlop={8}>
           <Ionicons name="arrow-redo-outline" size={21} color={Colors.textSecondary} />
-          <Text style={styles.actionCount}>{formatCount(post.shares)}</Text>
+          <Text style={styles.actionCount}>{formatCount(post.shares_count)}</Text>
         </Pressable>
 
         <Pressable style={[styles.actionBtn, { marginLeft: 'auto' }]} hitSlop={8}>
@@ -102,7 +94,7 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
 
       {commentExpanded ? (
         <View style={styles.commentBox}>
-          <Text style={styles.commentPlaceholder}>Be the first to drop a comment... 💬</Text>
+          <Text style={styles.commentPlaceholder}>Se el primero en comentar... 💬</Text>
         </View>
       ) : null}
     </View>
@@ -120,59 +112,15 @@ const styles = StyleSheet.create({
     borderColor: Colors.surfaceBorder,
     ...Shadows.card,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: Spacing.sm,
-  },
-  headerInfo: {
-    flex: 1,
-    marginLeft: Spacing.sm,
-  },
-  nameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  name: {
-    fontSize: FontSize.base,
-    fontWeight: FontWeight.semibold,
-    color: Colors.textPrimary,
-  },
-  username: {
-    fontSize: FontSize.sm,
-    color: Colors.textMuted,
-    marginTop: 2,
-  },
-  moreBtn: {
-    padding: Spacing.xs,
-  },
-  content: {
-    fontSize: FontSize.base,
-    color: Colors.textPrimary,
-    lineHeight: 24,
-    marginBottom: Spacing.sm,
-  },
-  tagsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginBottom: Spacing.sm,
-  },
-  tag: {
-    fontSize: FontSize.sm,
-    color: Colors.primaryLight,
-    fontWeight: FontWeight.medium,
-  },
-  imageWrapper: {
-    borderRadius: Radii.md,
-    overflow: 'hidden',
-    marginBottom: Spacing.sm,
-  },
-  postImage: {
-    width: '100%',
-    height: 220,
-    borderRadius: Radii.md,
-  },
+  header: { flexDirection: 'row', alignItems: 'center', marginBottom: Spacing.sm },
+  headerInfo: { flex: 1, marginLeft: Spacing.sm },
+  nameRow: { flexDirection: 'row', alignItems: 'center' },
+  name: { fontSize: FontSize.base, fontWeight: FontWeight.semibold, color: Colors.textPrimary },
+  username: { fontSize: FontSize.sm, color: Colors.textMuted, marginTop: 2 },
+  moreBtn: { padding: Spacing.xs },
+  content: { fontSize: FontSize.base, color: Colors.textPrimary, lineHeight: 24, marginBottom: Spacing.sm },
+  imageWrapper: { borderRadius: Radii.md, overflow: 'hidden', marginBottom: Spacing.sm },
+  postImage: { width: '100%', height: 220, borderRadius: Radii.md },
   actions: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -181,29 +129,9 @@ const styles = StyleSheet.create({
     borderTopColor: Colors.surfaceBorder,
     gap: Spacing.md,
   },
-  actionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    minHeight: 44,
-    paddingVertical: 4,
-  },
-  actionCount: {
-    fontSize: FontSize.sm,
-    color: Colors.textSecondary,
-    fontWeight: FontWeight.medium,
-  },
-  likedCount: {
-    color: Colors.secondary,
-  },
-  commentBox: {
-    marginTop: Spacing.sm,
-    padding: Spacing.sm,
-    backgroundColor: Colors.surfaceElevated,
-    borderRadius: Radii.sm,
-  },
-  commentPlaceholder: {
-    color: Colors.textMuted,
-    fontSize: FontSize.sm,
-  },
+  actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 44, paddingVertical: 4 },
+  actionCount: { fontSize: FontSize.sm, color: Colors.textSecondary, fontWeight: FontWeight.medium },
+  likedCount: { color: Colors.secondary },
+  commentBox: { marginTop: Spacing.sm, padding: Spacing.sm, backgroundColor: Colors.surfaceElevated, borderRadius: Radii.sm },
+  commentPlaceholder: { color: Colors.textMuted, fontSize: FontSize.sm },
 });

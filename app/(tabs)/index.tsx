@@ -1,32 +1,41 @@
 import React, { useCallback } from 'react';
-import { View, Text, FlatList, StyleSheet, Pressable } from 'react-native';
+import { View, Text, FlatList, StyleSheet, Pressable, ActivityIndicator, RefreshControl } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { PostCard } from '@/components/feature/PostCard';
-import { StoryBar } from '@/components/feature/StoryBar';
 import { useApp } from '@/hooks/useApp';
-import { MOCK_STORIES } from '@/constants/mockData';
 import { Colors, Spacing, FontSize, FontWeight } from '@/constants/theme';
+import { AppPost } from '@/types/database';
 
 export default function FeedScreen() {
   const insets = useSafeAreaInsets();
-  const { posts, toggleLike } = useApp();
+  const { posts, toggleLike, loadingPosts, refreshPosts } = useApp();
 
   const renderPost = useCallback(
-    ({ item }: { item: typeof posts[0] }) => (
+    ({ item }: { item: AppPost }) => (
       <PostCard post={item} onLike={toggleLike} />
     ),
     [toggleLike]
   );
 
-  const ListHeader = useCallback(
+  const ListEmpty = useCallback(
     () => (
-      <View>
-        <StoryBar stories={MOCK_STORIES} />
+      <View style={styles.emptyState}>
+        {loadingPosts ? (
+          <ActivityIndicator color={Colors.primary} size="large" />
+        ) : (
+          <>
+            <Ionicons name="newspaper-outline" size={48} color={Colors.textMuted} />
+            <Text style={styles.emptyTitle}>El feed esta vacio</Text>
+            <Text style={styles.emptySubtitle}>
+              Crea tu primer post o espera a que otros publiquen 🌊
+            </Text>
+          </>
+        )}
       </View>
     ),
-    []
+    [loadingPosts]
   );
 
   return (
@@ -57,9 +66,17 @@ export default function FeedScreen() {
         data={posts}
         keyExtractor={item => item.id}
         renderItem={renderPost}
-        ListHeaderComponent={ListHeader}
+        ListEmptyComponent={ListEmpty}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.list}
+        contentContainerStyle={posts.length === 0 ? styles.emptyList : styles.list}
+        refreshControl={
+          <RefreshControl
+            refreshing={loadingPosts}
+            onRefresh={refreshPosts}
+            tintColor={Colors.primary}
+            colors={[Colors.primary]}
+          />
+        }
       />
     </View>
   );
@@ -110,5 +127,28 @@ const styles = StyleSheet.create({
   },
   list: {
     paddingBottom: Spacing.xl,
+    paddingTop: Spacing.sm,
+  },
+  emptyList: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  emptyState: {
+    alignItems: 'center',
+    paddingVertical: Spacing.xxl,
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.xl,
+  },
+  emptyTitle: {
+    fontSize: FontSize.md,
+    fontWeight: FontWeight.semibold,
+    color: Colors.textSecondary,
+    marginTop: Spacing.sm,
+  },
+  emptySubtitle: {
+    fontSize: FontSize.base,
+    color: Colors.textMuted,
+    textAlign: 'center',
+    lineHeight: 22,
   },
 });

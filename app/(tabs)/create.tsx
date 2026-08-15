@@ -9,32 +9,35 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons, MaterialIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Avatar } from '@/components/ui/Avatar';
 import { useApp } from '@/hooks/useApp';
+import { useAuth } from '@/hooks/useAuth';
 import { Colors, Spacing, FontSize, FontWeight, Radii } from '@/constants/theme';
 import { useRouter } from 'expo-router';
 
-const MOOD_TAGS = ['🎵 Música', '📸 Fotos', '💡 Ideas', '🚀 Tech', '🌊 Vibes', '❤️ Amor', '🎨 Arte', '🌍 Travel'];
+const MOOD_TAGS = ['🎵 Musica', '📸 Fotos', '💡 Ideas', '🚀 Tech', '🌊 Vibes', '❤️ Amor', '🎨 Arte', '🌍 Travel'];
 
 export default function CreateScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { currentUser, addPost } = useApp();
+  const { addPost } = useApp();
+  const { profile } = useAuth();
   const [content, setContent] = useState('');
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
-  const [charCount, setCharCount] = useState(0);
+  const [loading, setLoading] = useState(false);
 
   const MAX_CHARS = 280;
+  const charCount = content.length;
+  const remaining = MAX_CHARS - charCount;
+  const progress = charCount / MAX_CHARS;
 
   const handleTextChange = (text: string) => {
-    if (text.length <= MAX_CHARS) {
-      setContent(text);
-      setCharCount(text.length);
-    }
+    if (text.length <= MAX_CHARS) setContent(text);
   };
 
   const toggleTag = (tag: string) => {
@@ -43,23 +46,25 @@ export default function CreateScreen() {
     );
   };
 
-  const handlePublish = () => {
+  const handlePublish = async () => {
     if (!content.trim()) {
       Alert.alert('Oops', 'Escribe algo antes de publicar.');
       return;
     }
-    addPost(content.trim());
+    setLoading(true);
+    const { error } = await addPost(content.trim());
+    setLoading(false);
+    if (error) {
+      Alert.alert('Error', error);
+      return;
+    }
     setContent('');
     setSelectedTags([]);
-    setCharCount(0);
-    Alert.alert('Publicado', 'Tu post aparece en el Feed. Revisa!', [
+    Alert.alert('Publicado', 'Tu post aparece en el Feed!', [
       { text: 'Ver Feed', onPress: () => router.push('/') },
       { text: 'Seguir creando', style: 'cancel' },
     ]);
   };
-
-  const progress = charCount / MAX_CHARS;
-  const remaining = MAX_CHARS - charCount;
 
   return (
     <KeyboardAvoidingView
@@ -73,16 +78,20 @@ export default function CreateScreen() {
             <Text style={styles.cancelText}>Limpiar</Text>
           </Pressable>
           <Text style={styles.title}>Nuevo Post</Text>
-          <Pressable onPress={handlePublish} disabled={!content.trim()}>
+          <Pressable onPress={handlePublish} disabled={!content.trim() || loading}>
             <LinearGradient
-              colors={content.trim() ? [Colors.primary, Colors.secondary] : [Colors.surfaceElevated, Colors.surfaceElevated]}
+              colors={content.trim() && !loading ? [Colors.primary, Colors.secondary] : [Colors.surfaceElevated, Colors.surfaceElevated]}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 0 }}
               style={styles.publishBtn}
             >
-              <Text style={[styles.publishText, !content.trim() ? styles.publishTextDisabled : null]}>
-                Publicar
-              </Text>
+              {loading ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <Text style={[styles.publishText, !content.trim() ? styles.publishTextDisabled : null]}>
+                  Publicar
+                </Text>
+              )}
             </LinearGradient>
           </Pressable>
         </View>
@@ -90,9 +99,9 @@ export default function CreateScreen() {
         <ScrollView showsVerticalScrollIndicator={false} style={styles.scroll}>
           {/* User + Input */}
           <View style={styles.inputArea}>
-            <Avatar uri={currentUser.avatar} size={44} />
+            <Avatar uri={profile?.avatar ?? 'https://i.pravatar.cc/150?img=7'} size={44} />
             <View style={styles.inputWrapper}>
-              <Text style={styles.userHandle}>@{currentUser.username}</Text>
+              <Text style={styles.userHandle}>@{profile?.username ?? 'tu'}</Text>
               <TextInput
                 style={styles.textInput}
                 placeholder="Que esta pasando en tu onda? 🌊"
@@ -161,10 +170,7 @@ export default function CreateScreen() {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  container: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
+  container: { flex: 1, backgroundColor: Colors.background },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -174,36 +180,21 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: Colors.surfaceBorder,
   },
-  cancelBtn: {
-    minWidth: 70,
-  },
-  cancelText: {
-    color: Colors.textMuted,
-    fontSize: FontSize.base,
-  },
-  title: {
-    fontSize: FontSize.md,
-    fontWeight: FontWeight.semibold,
-    color: Colors.textPrimary,
-  },
+  cancelBtn: { minWidth: 70 },
+  cancelText: { color: Colors.textMuted, fontSize: FontSize.base },
+  title: { fontSize: FontSize.md, fontWeight: FontWeight.semibold, color: Colors.textPrimary },
   publishBtn: {
     paddingHorizontal: Spacing.md,
     paddingVertical: 8,
     borderRadius: Radii.full,
     minWidth: 80,
     alignItems: 'center',
+    height: 38,
+    justifyContent: 'center',
   },
-  publishText: {
-    color: '#fff',
-    fontWeight: FontWeight.semibold,
-    fontSize: FontSize.base,
-  },
-  publishTextDisabled: {
-    color: Colors.textMuted,
-  },
-  scroll: {
-    flex: 1,
-  },
+  publishText: { color: '#fff', fontWeight: FontWeight.semibold, fontSize: FontSize.base },
+  publishTextDisabled: { color: Colors.textMuted },
+  scroll: { flex: 1 },
   inputArea: {
     flexDirection: 'row',
     padding: Spacing.md,
@@ -211,15 +202,8 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: Colors.surfaceBorder,
   },
-  inputWrapper: {
-    flex: 1,
-    gap: 6,
-  },
-  userHandle: {
-    color: Colors.primaryLight,
-    fontSize: FontSize.sm,
-    fontWeight: FontWeight.medium,
-  },
+  inputWrapper: { flex: 1, gap: 6 },
+  userHandle: { color: Colors.primaryLight, fontSize: FontSize.sm, fontWeight: FontWeight.medium },
   textInput: {
     color: Colors.textPrimary,
     fontSize: FontSize.md,
@@ -227,11 +211,7 @@ const styles = StyleSheet.create({
     minHeight: 120,
     textAlignVertical: 'top',
   },
-  section: {
-    padding: Spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.surfaceBorder,
-  },
+  section: { padding: Spacing.md, borderBottomWidth: 1, borderBottomColor: Colors.surfaceBorder },
   sectionTitle: {
     color: Colors.textMuted,
     fontSize: FontSize.sm,
@@ -240,11 +220,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginBottom: Spacing.sm,
   },
-  tagsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
+  tagsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   tag: {
     paddingHorizontal: Spacing.sm + 4,
     paddingVertical: 8,
@@ -253,23 +229,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Colors.surfaceBorder,
   },
-  tagSelected: {
-    backgroundColor: Colors.primary + '33',
-    borderColor: Colors.primary,
-  },
-  tagText: {
-    color: Colors.textSecondary,
-    fontSize: FontSize.sm,
-    fontWeight: FontWeight.medium,
-  },
-  tagTextSelected: {
-    color: Colors.primary,
-  },
-  mediaRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    padding: Spacing.md,
-  },
+  tagSelected: { backgroundColor: Colors.primary + '33', borderColor: Colors.primary },
+  tagText: { color: Colors.textSecondary, fontSize: FontSize.sm, fontWeight: FontWeight.medium },
+  tagTextSelected: { color: Colors.primary },
+  mediaRow: { flexDirection: 'row', justifyContent: 'space-around', padding: Spacing.md },
   mediaBtn: {
     alignItems: 'center',
     gap: 4,
@@ -278,10 +241,7 @@ const styles = StyleSheet.create({
     minHeight: 60,
     justifyContent: 'center',
   },
-  mediaBtnLabel: {
-    color: Colors.textMuted,
-    fontSize: FontSize.xs,
-  },
+  mediaBtnLabel: { color: Colors.textMuted, fontSize: FontSize.xs },
   footer: {
     paddingHorizontal: Spacing.md,
     paddingTop: Spacing.sm,
@@ -289,19 +249,7 @@ const styles = StyleSheet.create({
     borderTopColor: Colors.surfaceBorder,
     gap: 6,
   },
-  counterBar: {
-    height: 3,
-    backgroundColor: Colors.surfaceElevated,
-    borderRadius: 2,
-    overflow: 'hidden',
-  },
-  counterFill: {
-    height: 3,
-    borderRadius: 2,
-  },
-  counterText: {
-    color: Colors.textMuted,
-    fontSize: FontSize.xs,
-    textAlign: 'right',
-  },
+  counterBar: { height: 3, backgroundColor: Colors.surfaceElevated, borderRadius: 2, overflow: 'hidden' },
+  counterFill: { height: 3, borderRadius: 2 },
+  counterText: { color: Colors.textMuted, fontSize: FontSize.xs, textAlign: 'right' },
 });

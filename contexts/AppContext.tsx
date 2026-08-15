@@ -1,108 +1,128 @@
-import React, { createContext, useState, ReactNode } from 'react';
+import React, { createContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import { useAuthContext } from '@/contexts/AuthContext';
+import { AppPost, AppConversation } from '@/types/database';
 import {
-  MOCK_POSTS,
-  MOCK_CONVERSATIONS,
-  Post,
-  Conversation,
-  Message,
-  CURRENT_USER,
-  User,
-} from '@/constants/mockData';
+  fetchFeedPosts,
+  togglePostLike,
+  createPost as createPostService,
+} from '@/services/postService';
+import { fetchConversations } from '@/services/chatService';
 
 interface AppContextType {
-  posts: Post[];
-  conversations: Conversation[];
-  currentUser: User;
-  toggleLike: (postId: string) => void;
-  sendMessage: (conversationId: string, text: string) => void;
-  markConversationRead: (conversationId: string) => void;
-  addPost: (content: string, image?: string) => void;
+  posts: AppPost[];
+  conversations: AppConversation[];
+  loadingPosts: boolean;
+  loadingChats: boolean;
   totalUnread: number;
+  refreshPosts: () => Promise<void>;
+  refreshConversations: () => Promise<void>;
+  toggleLike: (postId: string) => Promise<void>;
+  addPost: (content: string, imageUrl?: string) => Promise<{ error: string | null }>;
+  updateConversationOptimistic: (conversationId: string, updates: Partial<AppConversation>) => void;
 }
 
 export const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [posts, setPosts] = useState<Post[]>(MOCK_POSTS);
-  const [conversations, setConversations] = useState<Conversation[]>(MOCK_CONVERSATIONS);
-  const currentUser = CURRENT_USER;
+  const { user, profile } = useAuthContext();
+  const [posts, setPosts] = useState<AppPost[]>([]);
+  const [conversations, setConversations] = useState<AppConversation[]>([]);
+  const [loadingPosts, setLoadingPosts] = useState(false);
+  const [loadingChats, setLoadingChats] = useState(false);
+
+  const refreshPosts = useCallback(async () => {
+    if (!user) return;
+    setLoadingPosts(true);
+    const data = await fetchFeedPosts(user.id);
+    setPosts(data);
+    setLoadingPosts(false);
+  }, [user]);
+
+  const refreshConversations = useCallback(async () => {
+    if (!user) return;
+    setLoadingChats(true);
+    const data = await fetchConversations(user.id);
+    setConversations(data);
+    setLoadingChats(false);
+  }, [user]);
+
+  useEffect(() => {
+    if (user) {
+      refreshPosts();
+      refreshConversations();
+    } else {
+      setPosts([]);
+      setConversations([]);
+    }
+  }, [user]);
+
+  const toggleLike = useCallback(
+    async (postId: string) => {
+      if (!user) return;
+      const post = posts.find(p => p.id === postId);
+      if (!post) return;
+
+      // Optimistic update
+      setPosts(prev =>
+        prev.map(p => {
+          if (p.id !== postId) return p;
+          return {
+            ...p,
+            liked: !p.liked,
+            likes_count: p.liked ? p.likes_count - 1 : p.likes_count + 1,
+          };
+        })
+      );
+
+      const { error } = await togglePostLike(postId, user.id, post.liked);
+      if (error) {
+        // Revert on error
+        setPosts(prev =>
+          prev.map(p => {
+            if (p.id !== postId) return p;
+            return { ...p, liked: post.liked, likes_count: post.likes_count };
+          })
+        );
+      }
+    },
+    [user, posts]
+  );
+
+  const addPost = useCallback(
+    async (content: string, imageUrl?: string): Promise<{ error: string | null }> => {
+      if (!user) return { error: 'Not authenticated' };
+      const { data, error } = await createPostService(user.id, content, imageUrl);
+      if (error) return { error };
+      if (data) setPosts(prev => [data, ...prev]);
+      return { error: null };
+    },
+    [user]
+  );
+
+  const updateConversationOptimistic = useCallback(
+    (conversationId: string, updates: Partial<AppConversation>) => {
+      setConversations(prev =>
+        prev.map(c => (c.id === conversationId ? { ...c, ...updates } : c))
+      );
+    },
+    []
+  );
 
   const totalUnread = conversations.reduce((sum, c) => sum + c.unread, 0);
-
-  const toggleLike = (postId: string) => {
-    setPosts(prev =>
-      prev.map(p => {
-        if (p.id !== postId) return p;
-        return {
-          ...p,
-          liked: !p.liked,
-          likes: p.liked ? p.likes - 1 : p.likes + 1,
-        };
-      })
-    );
-  };
-
-  const sendMessage = (conversationId: string, text: string) => {
-    const newMessage: Message = {
-      id: `m_${Date.now()}`,
-      senderId: 'me',
-      text,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      read: true,
-    };
-    setConversations(prev =>
-      prev.map(c => {
-        if (c.id !== conversationId) return c;
-        return {
-          ...c,
-          messages: [...c.messages, newMessage],
-          lastMessage: text,
-          lastTime: 'now',
-          unread: 0,
-        };
-      })
-    );
-  };
-
-  const markConversationRead = (conversationId: string) => {
-    setConversations(prev =>
-      prev.map(c => {
-        if (c.id !== conversationId) return c;
-        return {
-          ...c,
-          unread: 0,
-          messages: c.messages.map(m => ({ ...m, read: true })),
-        };
-      })
-    );
-  };
-
-  const addPost = (content: string, image?: string) => {
-    const newPost: Post = {
-      id: `p_${Date.now()}`,
-      user: currentUser,
-      content,
-      image,
-      likes: 0,
-      comments: 0,
-      shares: 0,
-      timestamp: 'just now',
-      liked: false,
-    };
-    setPosts(prev => [newPost, ...prev]);
-  };
 
   return (
     <AppContext.Provider
       value={{
         posts,
         conversations,
-        currentUser,
-        toggleLike,
-        sendMessage,
-        markConversationRead,
-        addPost,
+        loadingPosts,
+        loadingChats,
         totalUnread,
+        refreshPosts,
+        refreshConversations,
+        toggleLike,
+        addPost,
+        updateConversationOptimistic,
       }}
     >
       {children}

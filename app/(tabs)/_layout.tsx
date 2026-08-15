@@ -30,11 +30,7 @@ const badgeStyles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: Colors.tabBackground,
   },
-  text: {
-    color: '#fff',
-    fontSize: 9,
-    fontWeight: '700',
-  },
+  text: { color: '#fff', fontSize: 9, fontWeight: '700' },
 });
 
 export default function TabLayout() {
@@ -71,10 +67,7 @@ export default function TabLayout() {
         tabBarStyle,
         tabBarActiveTintColor: Colors.tabActive,
         tabBarInactiveTintColor: Colors.tabInactive,
-        tabBarLabelStyle: {
-          fontSize: FontSize.xs,
-          fontWeight: FontWeight.medium,
-        },
+        tabBarLabelStyle: { fontSize: FontSize.xs, fontWeight: FontWeight.medium },
       }}
     >
       <Tabs.Screen
@@ -138,8 +131,5 @@ const createIconStyles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 8,
   },
-  wrapperActive: {
-    backgroundColor: Colors.primaryDark,
-    shadowOpacity: 0.7,
-  },
+  wrapperActive: { backgroundColor: Colors.primaryDark, shadowOpacity: 0.7 },
 });
