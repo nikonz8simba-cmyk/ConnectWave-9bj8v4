@@ -20,7 +20,7 @@ import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import * as Location from 'expo-location';
-import { Video as VideoCompressor } from 'react-native-compressor';
+import { compressVideo } from '@/services/videoCompressor';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { Avatar } from '@/components/ui/Avatar';
 import { MentionInput } from '@/components/ui/MentionInput';
@@ -885,14 +885,8 @@ export default function CreateScreen() {
         setCompressProgress(0);
         try {
           console.log('[handlePublish] Starting video compression...');
-          const compressedUri = await VideoCompressor.compress(
+          const compressedUri = await compressVideo(
             media.uri,
-            {
-              compressionMethod: 'auto',
-              maxSize: 1280,           // max dimension (720p/1080p adaptive)
-              bitrate: 2_000_000,      // 2 Mbps → great quality, small size
-              minimumFileSizeForCompress: 5,  // compress anything > 5 MB
-            },
             (progress) => {
               // progress is 0–1
               setCompressProgress(Math.round(progress * 100));
