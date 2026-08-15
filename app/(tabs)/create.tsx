@@ -216,13 +216,19 @@ function base64ToUint8Array(base64: string): Uint8Array {
 }
 
 /**
- * Universal upload function:
- *  1. Normalises content:// → file:// via FileSystem.copyAsync (Android only)
- *  2. Reads file as base64 via FileSystem.readAsStringAsync — the ONLY reliable
- *     path for large native video files on both iOS and Android (Hermes/JavaScriptCore).
- *     `fetch(uri) → blob → XHR.send(blob)` silently drops large blobs on iOS.
- *  3. Decodes base64 → Uint8Array (no atob dependency)
- *  4. Uploads via XMLHttpRequest with Uint8Array for real onprogress events
+ * Universal upload function — OOM-safe strategy:
+ *
+ * VIDEO path (after compression, ~10–15 MB):
+ *   fetch(uri) → response.blob()
+ *   ─ The native layer creates a Blob REFERENCE; zero bytes are copied into the
+ *     JS heap. readAsStringAsync is PROHIBITED here — a 130 MB video becomes
+ *     ~174 MB of base64 in RAM → OutOfMemoryError on Android.
+ *   ─ XHR.send(blob) streams the data natively with accurate onprogress events.
+ *
+ * IMAGE path (typically < 5 MB):
+ *   readAsStringAsync → base64 → Uint8Array → XHR.send(buffer)
+ *   ─ Safe because images are small. Provides reliable binary upload on all
+ *     platforms including Hermes/iOS.
  */
 async function uploadMedia(
   asset: MediaAsset,
@@ -237,68 +243,118 @@ async function uploadMedia(
 
     // Step 1: Normalise content:// → file:// (Android only)
     const safeUri = await normaliseUri(asset.uri, ext);
-    console.log('[uploadMedia] Starting:', { uri: safeUri, mimeType, fileName });
+    console.log('[uploadMedia] Starting:', { uri: safeUri, mimeType, fileName, type: asset.type });
     onProgress?.({ percentage: 2, uploadedBytes: 0, totalBytes: 0 });
 
-    // Step 2: Read file as base64 via FileSystem
-    // This is reliable on both iOS (file://) and Android (file:// after normalise)
-    let base64: string;
-    try {
-      base64 = await FileSystem.readAsStringAsync(safeUri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-    } catch (fsErr: any) {
-      console.error('[uploadMedia] FileSystem.readAsStringAsync error:', fsErr?.message);
-      return { url: null, error: `No se pudo leer el archivo: ${fsErr?.message}` };
-    }
-
-    if (!base64 || base64.length === 0) {
-      return { url: null, error: 'El archivo está vacío o no es accesible. Intenta seleccionarlo de nuevo.' };
-    }
-
-    // Step 3: Decode base64 → Uint8Array
-    const bytes = base64ToUint8Array(base64);
-    const totalBytes = bytes.byteLength;
-    console.log('[uploadMedia] File size:', formatBytes(totalBytes));
-    onProgress?.({ percentage: 5, uploadedBytes: 0, totalBytes });
-
-    // Step 4: Upload via XHR with Uint8Array (progress works correctly with binary data)
     const { data: { session } } = await supabase.auth.getSession();
     const authToken = session?.access_token ?? (process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '');
     const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
     const storageUrl = `${supabaseUrl}/storage/v1/object/posts-media/${fileName}`;
 
-    await new Promise<void>((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
+    if (asset.type === 'video') {
+      // ── VIDEO: fetch → native Blob reference (no JS heap allocation) ──────
+      // NEVER use readAsStringAsync for video — it copies the whole file into
+      // the JS heap as a base64 string, causing OutOfMemoryError on Android.
+      let blob: Blob;
+      try {
+        const response = await fetch(safeUri);
+        blob = await response.blob();
+      } catch (fetchErr: any) {
+        console.error('[uploadMedia] fetch/blob error:', fetchErr?.message);
+        return { url: null, error: `No se pudo leer el video: ${fetchErr?.message}` };
+      }
 
-      xhr.upload.onprogress = (e) => {
-        const loaded = e.lengthComputable ? e.loaded : 0;
-        const total  = e.lengthComputable ? e.total  : totalBytes;
-        const pct = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
-        onProgress?.({ percentage: pct, uploadedBytes: loaded, totalBytes: total });
-      };
+      const totalBytes = blob.size;
+      console.log('[uploadMedia] Video blob size:', formatBytes(totalBytes));
 
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve();
-        } else {
-          console.error('[uploadMedia] XHR error:', xhr.status, xhr.responseText);
-          reject(new Error(`Upload failed (${xhr.status}): ${xhr.responseText}`));
-        }
-      };
+      if (totalBytes === 0) {
+        return { url: null, error: 'El video está vacío o no es accesible. Intenta seleccionarlo de nuevo.' };
+      }
 
-      xhr.onerror = () => reject(new Error('Error de red durante la subida'));
-      xhr.ontimeout = () => reject(new Error('Tiempo de espera agotado'));
+      onProgress?.({ percentage: 5, uploadedBytes: 0, totalBytes });
 
-      xhr.open('POST', storageUrl);
-      xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
-      xhr.setRequestHeader('Content-Type', mimeType);
-      xhr.setRequestHeader('x-upsert', 'false');
-      xhr.timeout = 180_000; // 3 min timeout for large videos
-      xhr.send(bytes.buffer);
-    });
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
 
-    onProgress?.({ percentage: 100, uploadedBytes: totalBytes, totalBytes });
+        xhr.upload.onprogress = (e) => {
+          const loaded = e.lengthComputable ? e.loaded : 0;
+          const total  = e.lengthComputable ? e.total  : totalBytes;
+          const pct = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
+          onProgress?.({ percentage: pct, uploadedBytes: loaded, totalBytes: total });
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else {
+            console.error('[uploadMedia] Video XHR error:', xhr.status, xhr.responseText);
+            reject(new Error(`Upload failed (${xhr.status}): ${xhr.responseText}`));
+          }
+        };
+
+        xhr.onerror = () => reject(new Error('Error de red durante la subida del video'));
+        xhr.ontimeout = () => reject(new Error('Tiempo de espera agotado'));
+
+        xhr.open('POST', storageUrl);
+        xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+        xhr.setRequestHeader('Content-Type', mimeType);
+        xhr.setRequestHeader('x-upsert', 'false');
+        xhr.timeout = 300_000; // 5 min for compressed videos
+        xhr.send(blob);        // blob is a native reference — no JS memory spike
+      });
+
+      onProgress?.({ percentage: 100, uploadedBytes: totalBytes, totalBytes });
+    } else {
+      // ── IMAGE: readAsStringAsync is safe (images are typically < 5 MB) ────
+      let base64: string;
+      try {
+        base64 = await FileSystem.readAsStringAsync(safeUri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      } catch (fsErr: any) {
+        console.error('[uploadMedia] readAsStringAsync error:', fsErr?.message);
+        return { url: null, error: `No se pudo leer la imagen: ${fsErr?.message}` };
+      }
+
+      if (!base64 || base64.length === 0) {
+        return { url: null, error: 'La imagen está vacía o no es accesible. Intenta seleccionarla de nuevo.' };
+      }
+
+      const bytes = base64ToUint8Array(base64);
+      const totalBytes = bytes.byteLength;
+      console.log('[uploadMedia] Image size:', formatBytes(totalBytes));
+      onProgress?.({ percentage: 5, uploadedBytes: 0, totalBytes });
+
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+
+        xhr.upload.onprogress = (e) => {
+          const loaded = e.lengthComputable ? e.loaded : 0;
+          const total  = e.lengthComputable ? e.total  : totalBytes;
+          const pct = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
+          onProgress?.({ percentage: pct, uploadedBytes: loaded, totalBytes: total });
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else {
+            console.error('[uploadMedia] Image XHR error:', xhr.status, xhr.responseText);
+            reject(new Error(`Upload failed (${xhr.status}): ${xhr.responseText}`));
+          }
+        };
+
+        xhr.onerror = () => reject(new Error('Error de red durante la subida'));
+        xhr.ontimeout = () => reject(new Error('Tiempo de espera agotado'));
+
+        xhr.open('POST', storageUrl);
+        xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+        xhr.setRequestHeader('Content-Type', mimeType);
+        xhr.setRequestHeader('x-upsert', 'false');
+        xhr.timeout = 60_000;
+        xhr.send(bytes.buffer);
+      });
+
+      onProgress?.({ percentage: 100, uploadedBytes: totalBytes, totalBytes });
+    }
 
     const { data } = supabase.storage.from('posts-media').getPublicUrl(fileName);
     console.log('[uploadMedia] Success:', data.publicUrl);
