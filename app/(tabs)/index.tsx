@@ -1,16 +1,39 @@
-import React, { useCallback } from 'react';
-import { View, Text, FlatList, StyleSheet, Pressable, ActivityIndicator, RefreshControl } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import {
+  View,
+  Text,
+  FlatList,
+  StyleSheet,
+  Pressable,
+  ActivityIndicator,
+  RefreshControl,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { PostCard } from '@/components/feature/PostCard';
+import { StoryBar } from '@/components/feature/StoryBar';
 import { useApp } from '@/hooks/useApp';
-import { Colors, Spacing, FontSize, FontWeight } from '@/constants/theme';
+import { Colors, Spacing, FontSize, FontWeight, Radii } from '@/constants/theme';
 import { AppPost } from '@/types/database';
+import { MOCK_STORIES } from '@/constants/mockData';
+
+const FILTER_CATEGORIES = ['Todo', 'Fotos', 'Videos', 'Trending'] as const;
+type FilterCategory = (typeof FILTER_CATEGORIES)[number];
 
 export default function FeedScreen() {
   const insets = useSafeAreaInsets();
-  const { posts, toggleLike, loadingPosts, refreshPosts } = useApp();
+  const { posts, toggleLike, loadingPosts, refreshPosts, loadMorePosts, loadingMorePosts, hasMorePosts } = useApp();
+  const [activeFilter, setActiveFilter] = useState<FilterCategory>('Todo');
+
+  const filteredPosts = posts.filter(p => {
+    if (activeFilter === 'Todo') return true;
+    if (activeFilter === 'Fotos') return p.media_type === 'image' || p.image_url != null;
+    if (activeFilter === 'Videos') return p.media_type === 'video';
+    // Trending: top 20% by likes
+    const avgLikes = posts.reduce((s, pp) => s + pp.likes_count, 0) / Math.max(posts.length, 1);
+    return p.likes_count >= avgLikes;
+  });
 
   const renderPost = useCallback(
     ({ item }: { item: AppPost }) => (
@@ -19,7 +42,36 @@ export default function FeedScreen() {
     [toggleLike]
   );
 
-  const ListEmpty = useCallback(
+  const keyExtractor = useCallback((item: AppPost) => item.id, []);
+
+  const ListHeaderComponent = useCallback(
+    () => (
+      <>
+        <StoryBar stories={MOCK_STORIES} />
+        {/* Category filter chips */}
+        <View style={styles.filterRow}>
+          {FILTER_CATEGORIES.map(cat => {
+            const active = activeFilter === cat;
+            return (
+              <Pressable
+                key={cat}
+                style={[styles.chip, active ? styles.chipActive : null]}
+                onPress={() => setActiveFilter(cat)}
+                hitSlop={6}
+              >
+                <Text style={[styles.chipText, active ? styles.chipTextActive : null]}>
+                  {cat}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </>
+    ),
+    [activeFilter]
+  );
+
+  const ListEmptyComponent = useCallback(
     () => (
       <View style={styles.emptyState}>
         {loadingPosts ? (
@@ -37,6 +89,33 @@ export default function FeedScreen() {
     ),
     [loadingPosts]
   );
+
+  const ListFooterComponent = useCallback(
+    () => {
+      if (!loadingMorePosts && !hasMorePosts && filteredPosts.length > 0) {
+        return (
+          <View style={styles.endReached}>
+            <Text style={styles.endReachedText}>Has llegado al final 🌊</Text>
+          </View>
+        );
+      }
+      if (loadingMorePosts) {
+        return (
+          <View style={styles.loadingMore}>
+            <ActivityIndicator color={Colors.primary} size="small" />
+          </View>
+        );
+      }
+      return null;
+    },
+    [loadingMorePosts, hasMorePosts, filteredPosts.length]
+  );
+
+  const handleEndReached = useCallback(() => {
+    if (activeFilter === 'Todo' && !loadingMorePosts && hasMorePosts) {
+      loadMorePosts();
+    }
+  }, [activeFilter, loadingMorePosts, hasMorePosts, loadMorePosts]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -63,12 +142,16 @@ export default function FeedScreen() {
 
       {/* Feed */}
       <FlatList
-        data={posts}
-        keyExtractor={item => item.id}
+        data={filteredPosts}
+        keyExtractor={keyExtractor}
         renderItem={renderPost}
-        ListEmptyComponent={ListEmpty}
+        ListHeaderComponent={ListHeaderComponent}
+        ListEmptyComponent={ListEmptyComponent}
+        ListFooterComponent={ListFooterComponent}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={posts.length === 0 ? styles.emptyList : styles.list}
+        contentContainerStyle={filteredPosts.length === 0 ? styles.emptyList : styles.list}
+        onEndReached={handleEndReached}
+        onEndReachedThreshold={0.4}
         refreshControl={
           <RefreshControl
             refreshing={loadingPosts}
@@ -77,6 +160,10 @@ export default function FeedScreen() {
             colors={[Colors.primary]}
           />
         }
+        removeClippedSubviews
+        windowSize={7}
+        maxToRenderPerBatch={5}
+        updateCellsBatchingPeriod={50}
       />
     </View>
   );
@@ -125,12 +212,41 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderRadius: 20,
   },
+  filterRow: {
+    flexDirection: 'row',
+    paddingHorizontal: Spacing.md,
+    paddingBottom: Spacing.md,
+    gap: 8,
+  },
+  chip: {
+    paddingHorizontal: 14,
+    height: 34,
+    borderRadius: Radii.full,
+    backgroundColor: Colors.surfaceElevated,
+    borderWidth: 1,
+    borderColor: Colors.surfaceBorder,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chipActive: {
+    backgroundColor: Colors.primary,
+    borderColor: Colors.primary,
+  },
+  chipText: {
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.medium,
+    color: Colors.textSecondary,
+  },
+  chipTextActive: {
+    color: '#fff',
+    fontWeight: FontWeight.semibold,
+  },
   list: {
     paddingBottom: Spacing.xl,
     paddingTop: Spacing.sm,
   },
   emptyList: {
-    flex: 1,
+    flexGrow: 1,
     justifyContent: 'center',
   },
   emptyState: {
@@ -150,5 +266,19 @@ const styles = StyleSheet.create({
     color: Colors.textMuted,
     textAlign: 'center',
     lineHeight: 22,
+  },
+  loadingMore: {
+    paddingVertical: Spacing.lg,
+    alignItems: 'center',
+  },
+  endReached: {
+    paddingVertical: Spacing.lg,
+    alignItems: 'center',
+    gap: 4,
+  },
+  endReachedText: {
+    fontSize: FontSize.sm,
+    color: Colors.textMuted,
+    fontWeight: FontWeight.medium,
   },
 });

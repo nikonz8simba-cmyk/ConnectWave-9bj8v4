@@ -18,11 +18,15 @@ export interface DbPost {
   user_id: string;
   content: string;
   image_url: string | null;
+  video_url: string | null;
+  media_type: 'text' | 'image' | 'video';
   likes_count: number;
   comments_count: number;
   shares_count: number;
   created_at: string;
   user_profiles?: DbUserProfile;
+  // from get_discovery_feed RPC
+  score?: number;
 }
 
 export interface DbPostLike {
@@ -73,13 +77,15 @@ export interface AppPost {
   user: AppUser;
   content: string;
   image_url: string | null;
+  video_url: string | null;
+  media_type: 'text' | 'image' | 'video';
   likes_count: number;
   comments_count: number;
   shares_count: number;
   created_at: string;
   liked: boolean;
-  // local formatted
   timestamp: string;
+  score?: number;
 }
 
 export interface AppMessage {

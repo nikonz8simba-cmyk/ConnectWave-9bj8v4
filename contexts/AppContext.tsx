@@ -2,7 +2,7 @@ import React, { createContext, useState, useEffect, useCallback, ReactNode } fro
 import { useAuthContext } from '@/contexts/AuthContext';
 import { AppPost, AppConversation } from '@/types/database';
 import {
-  fetchFeedPosts,
+  fetchDiscoveryFeed,
   togglePostLike,
   createPost as createPostService,
 } from '@/services/postService';
@@ -12,12 +12,15 @@ interface AppContextType {
   posts: AppPost[];
   conversations: AppConversation[];
   loadingPosts: boolean;
+  loadingMorePosts: boolean;
+  hasMorePosts: boolean;
   loadingChats: boolean;
   totalUnread: number;
   refreshPosts: () => Promise<void>;
+  loadMorePosts: () => Promise<void>;
   refreshConversations: () => Promise<void>;
   toggleLike: (postId: string) => Promise<void>;
-  addPost: (content: string, imageUrl?: string) => Promise<{ error: string | null }>;
+  addPost: (content: string, imageUrl?: string, videoUrl?: string) => Promise<{ error: string | null }>;
   updateConversationOptimistic: (conversationId: string, updates: Partial<AppConversation>) => void;
 }
 
@@ -28,15 +31,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [posts, setPosts] = useState<AppPost[]>([]);
   const [conversations, setConversations] = useState<AppConversation[]>([]);
   const [loadingPosts, setLoadingPosts] = useState(false);
+  const [loadingMorePosts, setLoadingMorePosts] = useState(false);
+  const [hasMorePosts, setHasMorePosts] = useState(true);
+  const [feedOffset, setFeedOffset] = useState(0);
   const [loadingChats, setLoadingChats] = useState(false);
 
   const refreshPosts = useCallback(async () => {
     if (!user) return;
     setLoadingPosts(true);
-    const data = await fetchFeedPosts(user.id);
+    const { posts: data, hasMore } = await fetchDiscoveryFeed(user.id, 0);
     setPosts(data);
+    setHasMorePosts(hasMore);
+    setFeedOffset(data.length);
     setLoadingPosts(false);
   }, [user]);
+
+  const loadMorePosts = useCallback(async () => {
+    if (!user || loadingMorePosts || !hasMorePosts) return;
+    setLoadingMorePosts(true);
+    const { posts: more, hasMore } = await fetchDiscoveryFeed(user.id, feedOffset);
+    if (more.length > 0) {
+      setPosts(prev => {
+        const ids = new Set(prev.map(p => p.id));
+        return [...prev, ...more.filter(p => !ids.has(p.id))];
+      });
+      setFeedOffset(prev => prev + more.length);
+    }
+    setHasMorePosts(hasMore);
+    setLoadingMorePosts(false);
+  }, [user, feedOffset, loadingMorePosts, hasMorePosts]);
 
   const refreshConversations = useCallback(async () => {
     if (!user) return;
@@ -89,11 +112,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const addPost = useCallback(
-    async (content: string, imageUrl?: string): Promise<{ error: string | null }> => {
+    async (content: string, imageUrl?: string, videoUrl?: string): Promise<{ error: string | null }> => {
       if (!user) return { error: 'Not authenticated' };
-      const { data, error } = await createPostService(user.id, content, imageUrl);
+      const { data, error } = await createPostService(user.id, content, imageUrl, videoUrl);
       if (error) return { error };
-      if (data) setPosts(prev => [data, ...prev]);
+      if (data) {
+        setPosts(prev => [data, ...prev]);
+        setFeedOffset(prev => prev + 1);
+      }
       return { error: null };
     },
     [user]
@@ -116,9 +142,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
         posts,
         conversations,
         loadingPosts,
+        loadingMorePosts,
+        hasMorePosts,
         loadingChats,
         totalUnread,
         refreshPosts,
+        loadMorePosts,
         refreshConversations,
         toggleLike,
         addPost,

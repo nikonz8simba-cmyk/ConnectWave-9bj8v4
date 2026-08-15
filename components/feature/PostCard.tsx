@@ -1,6 +1,7 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import { View, Text, StyleSheet, Pressable, Animated } from 'react-native';
 import { Image } from 'expo-image';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import { Avatar } from '@/components/ui/Avatar';
 import { Colors, Spacing, Radii, FontSize, FontWeight, Shadows } from '@/constants/theme';
@@ -12,18 +13,55 @@ interface PostCardProps {
 }
 
 function formatCount(n: number): string {
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
 }
 
+// ─────────────────────────────────────────────
+// VideoPost — inline video player
+// ─────────────────────────────────────────────
+function VideoPost({ uri }: { uri: string }) {
+  const player = useVideoPlayer(uri, p => {
+    p.loop = true;
+  });
+  const [muted, setMuted] = useState(true);
+
+  const toggleMute = () => {
+    player.muted = !player.muted;
+    setMuted(v => !v);
+  };
+
+  return (
+    <View style={styles.videoWrapper}>
+      <VideoView
+        player={player}
+        style={styles.postVideo}
+        contentFit="cover"
+        nativeControls={false}
+      />
+      <Pressable style={styles.muteBtn} onPress={toggleMute} hitSlop={8}>
+        <Ionicons
+          name={muted ? 'volume-mute' : 'volume-high'}
+          size={16}
+          color="#fff"
+        />
+      </Pressable>
+    </View>
+  );
+}
+
+// ─────────────────────────────────────────────
+// PostCard
+// ─────────────────────────────────────────────
 export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardProps) {
   const [scale] = useState(new Animated.Value(1));
   const [commentExpanded, setCommentExpanded] = useState(false);
 
   const handleLike = useCallback(() => {
     Animated.sequence([
-      Animated.timing(scale, { toValue: 1.3, duration: 120, useNativeDriver: true }),
-      Animated.timing(scale, { toValue: 1, duration: 120, useNativeDriver: true }),
+      Animated.timing(scale, { toValue: 1.35, duration: 110, useNativeDriver: true }),
+      Animated.timing(scale, { toValue: 1, duration: 110, useNativeDriver: true }),
     ]).start();
     onLike(post.id);
   }, [onLike, post.id, scale]);
@@ -35,7 +73,7 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
         <Avatar uri={post.user.avatar} size={42} />
         <View style={styles.headerInfo}>
           <View style={styles.nameRow}>
-            <Text style={styles.name}>{post.user.name}</Text>
+            <Text style={styles.name} numberOfLines={1}>{post.user.name}</Text>
             {post.user.verified ? (
               <MaterialIcons name="verified" size={14} color={Colors.primary} style={{ marginLeft: 4 }} />
             ) : null}
@@ -48,10 +86,14 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
       </View>
 
       {/* Content */}
-      <Text style={styles.content}>{post.content}</Text>
+      {post.content ? (
+        <Text style={styles.content}>{post.content}</Text>
+      ) : null}
 
-      {/* Image */}
-      {post.image_url ? (
+      {/* Media */}
+      {post.media_type === 'video' && post.video_url ? (
+        <VideoPost uri={post.video_url} />
+      ) : post.image_url ? (
         <View style={styles.imageWrapper}>
           <Image
             source={{ uri: post.image_url }}
@@ -78,7 +120,11 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
         </Pressable>
 
         <Pressable style={styles.actionBtn} onPress={() => setCommentExpanded(v => !v)} hitSlop={8}>
-          <Ionicons name="chatbubble-outline" size={20} color={Colors.textSecondary} />
+          <Ionicons
+            name={commentExpanded ? 'chatbubble' : 'chatbubble-outline'}
+            size={20}
+            color={commentExpanded ? Colors.primary : Colors.textSecondary}
+          />
           <Text style={styles.actionCount}>{formatCount(post.comments_count)}</Text>
         </Pressable>
 
@@ -92,6 +138,7 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
         </Pressable>
       </View>
 
+      {/* Comment box */}
       {commentExpanded ? (
         <View style={styles.commentBox}>
           <Text style={styles.commentPlaceholder}>Se el primero en comentar... 💬</Text>
@@ -115,12 +162,37 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', marginBottom: Spacing.sm },
   headerInfo: { flex: 1, marginLeft: Spacing.sm },
   nameRow: { flexDirection: 'row', alignItems: 'center' },
-  name: { fontSize: FontSize.base, fontWeight: FontWeight.semibold, color: Colors.textPrimary },
+  name: { fontSize: FontSize.base, fontWeight: FontWeight.semibold, color: Colors.textPrimary, flex: 1 },
   username: { fontSize: FontSize.sm, color: Colors.textMuted, marginTop: 2 },
   moreBtn: { padding: Spacing.xs },
-  content: { fontSize: FontSize.base, color: Colors.textPrimary, lineHeight: 24, marginBottom: Spacing.sm },
+  content: {
+    fontSize: FontSize.base,
+    color: Colors.textPrimary,
+    lineHeight: 24,
+    marginBottom: Spacing.sm,
+  },
   imageWrapper: { borderRadius: Radii.md, overflow: 'hidden', marginBottom: Spacing.sm },
-  postImage: { width: '100%', height: 220, borderRadius: Radii.md },
+  postImage: { width: '100%', height: 240, borderRadius: Radii.md },
+  videoWrapper: {
+    borderRadius: Radii.md,
+    overflow: 'hidden',
+    marginBottom: Spacing.sm,
+    height: 240,
+    position: 'relative',
+    backgroundColor: Colors.background,
+  },
+  postVideo: { width: '100%', height: '100%' },
+  muteBtn: {
+    position: 'absolute',
+    bottom: 10,
+    right: 10,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: 14,
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   actions: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -129,9 +201,24 @@ const styles = StyleSheet.create({
     borderTopColor: Colors.surfaceBorder,
     gap: Spacing.md,
   },
-  actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 44, paddingVertical: 4 },
-  actionCount: { fontSize: FontSize.sm, color: Colors.textSecondary, fontWeight: FontWeight.medium },
+  actionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    minHeight: 44,
+    paddingVertical: 4,
+  },
+  actionCount: {
+    fontSize: FontSize.sm,
+    color: Colors.textSecondary,
+    fontWeight: FontWeight.medium,
+  },
   likedCount: { color: Colors.secondary },
-  commentBox: { marginTop: Spacing.sm, padding: Spacing.sm, backgroundColor: Colors.surfaceElevated, borderRadius: Radii.sm },
+  commentBox: {
+    marginTop: Spacing.sm,
+    padding: Spacing.sm,
+    backgroundColor: Colors.surfaceElevated,
+    borderRadius: Radii.sm,
+  },
   commentPlaceholder: { color: Colors.textMuted, fontSize: FontSize.sm },
 });
