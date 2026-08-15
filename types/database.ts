@@ -96,6 +96,8 @@ export interface AppMessage {
   read: boolean;
   created_at: string;
   timestamp: string;
+  media_url?: string;
+  media_type?: string;
 }
 
 export interface AppConversation {

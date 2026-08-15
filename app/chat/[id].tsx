@@ -9,11 +9,14 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { Image } from 'expo-image';
+import * as ImagePicker from 'expo-image-picker';
 import { Avatar } from '@/components/ui/Avatar';
 import { useAuth } from '@/hooks/useAuth';
 import { useApp } from '@/hooks/useApp';
@@ -26,36 +29,72 @@ import { supabase } from '@/lib/supabase';
 import { Colors, Spacing, FontSize, FontWeight, Radii } from '@/constants/theme';
 import { AppMessage } from '@/types/database';
 
+// Extended message type with media
+interface ChatMessage extends AppMessage {
+  media_url?: string;
+  media_type_msg?: 'text' | 'image' | 'video';
+}
+
+async function uploadChatMedia(uri: string, userId: string, mimeType: string): Promise<string | null> {
+  try {
+    const ext = mimeType.split('/')[1] ?? 'jpg';
+    const fileName = `${userId}/chat_${Date.now()}.${ext}`;
+    const response = await fetch(uri);
+    const blob = await response.blob();
+
+    if (Platform.OS === 'web') {
+      const { error } = await supabase.storage
+        .from('posts-media')
+        .upload(fileName, blob, { contentType: mimeType, upsert: false });
+      if (error) return null;
+    } else {
+      const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as ArrayBuffer);
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(blob);
+      });
+      const { error } = await supabase.storage
+        .from('posts-media')
+        .upload(fileName, arrayBuffer, { contentType: mimeType, upsert: false });
+      if (error) return null;
+    }
+
+    const { data } = supabase.storage.from('posts-media').getPublicUrl(fileName);
+    return data.publicUrl;
+  } catch {
+    return null;
+  }
+}
+
 export default function ChatDetailScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
   const { conversations, updateConversationOptimistic } = useApp();
-  const [messages, setMessages] = useState<AppMessage[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [loadingMessages, setLoadingMessages] = useState(true);
   const [sending, setSending] = useState(false);
+  const [uploadingMedia, setUploadingMedia] = useState(false);
   const flatListRef = useRef<FlatList>(null);
 
   const conversation = conversations.find(c => c.id === id);
 
-  // Load messages
   useEffect(() => {
     if (!id) return;
     setLoadingMessages(true);
     fetchMessages(id).then(msgs => {
-      setMessages(msgs);
+      setMessages(msgs as ChatMessage[]);
       setLoadingMessages(false);
     });
   }, [id]);
 
-  // Mark as read
   useEffect(() => {
     if (id && user?.id) markMessagesRead(id, user.id);
   }, [id, user]);
 
-  // Scroll to bottom when messages change
   useEffect(() => {
     if (messages.length > 0) {
       setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
@@ -70,104 +109,191 @@ export default function ChatDetailScreen() {
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${id}` },
-        (payload) => {
+        payload => {
           const newMsg = payload.new as any;
-          if (newMsg.sender_id === user?.id) return; // Already added optimistically
-          const appMsg: AppMessage = {
+          if (newMsg.sender_id === user?.id) return;
+          const appMsg: ChatMessage = {
             id: newMsg.id,
             conversation_id: newMsg.conversation_id,
             sender_id: newMsg.sender_id,
             text: newMsg.text,
             read: newMsg.read,
             created_at: newMsg.created_at,
-            timestamp: new Date(newMsg.created_at).toLocaleTimeString([], {
-              hour: '2-digit',
-              minute: '2-digit',
-            }),
+            timestamp: new Date(newMsg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            media_url: newMsg.media_url ?? undefined,
+            media_type_msg: newMsg.media_type ?? 'text',
           };
           setMessages(prev => [...prev, appMsg]);
           if (user?.id) markMessagesRead(id, user.id);
         }
       )
+      // Real-time read receipts
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'messages', filter: `conversation_id=eq.${id}` },
+        payload => {
+          const updated = payload.new as any;
+          setMessages(prev => prev.map(m => m.id === updated.id ? { ...m, read: updated.read } : m));
+        }
+      )
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => { supabase.removeChannel(channel); };
   }, [id, user]);
 
-  const handleSend = useCallback(async () => {
-    const text = inputText.trim();
-    if (!text || !id || !user?.id || sending) return;
+  const handleSend = useCallback(async (mediaUrl?: string, mediaType?: string) => {
+    const text = mediaUrl ? (inputText.trim() || '') : inputText.trim();
+    if (!text && !mediaUrl) return;
+    if (!id || !user?.id || sending) return;
 
-    // Optimistic message
-    const optimisticMsg: AppMessage = {
+    const optimisticMsg: ChatMessage = {
       id: `temp_${Date.now()}`,
       conversation_id: id,
       sender_id: user.id,
-      text,
+      text: text || (mediaType === 'image' ? '📷 Foto' : '🎥 Video'),
       read: true,
       created_at: new Date().toISOString(),
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      media_url: mediaUrl,
+      media_type_msg: (mediaType as any) ?? 'text',
     };
+
     setMessages(prev => [...prev, optimisticMsg]);
-    setInputText('');
+    if (!mediaUrl) setInputText('');
     setSending(true);
 
-    const { data, error } = await sendMessageService(id, user.id, text);
+    const { data, error } = await sendMessageService(id, user.id, optimisticMsg.text, mediaUrl, mediaType);
     setSending(false);
 
     if (error) {
-      // Revert optimistic
       setMessages(prev => prev.filter(m => m.id !== optimisticMsg.id));
-      setInputText(text);
+      if (!mediaUrl) setInputText(text);
     } else if (data) {
-      // Replace optimistic with real
       setMessages(prev =>
-        prev.map(m => (m.id === optimisticMsg.id ? data : m))
+        prev.map(m => (m.id === optimisticMsg.id ? { ...data, media_url: mediaUrl, media_type_msg: (mediaType as any) ?? 'text' } : m))
       );
-      // Update conversation list
-      updateConversationOptimistic(id, {
-        last_message: text,
-        last_time: 'now',
-        unread: 0,
-      });
+      updateConversationOptimistic(id, { last_message: optimisticMsg.text, last_time: 'ahora', unread: 0 });
     }
   }, [inputText, id, user, sending, updateConversationOptimistic]);
+
+  const pickAndSendImage = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') { Alert.alert('Permiso requerido', 'Necesitamos acceso a tu galería.'); return; }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images', 'videos'],
+      allowsEditing: false,
+      quality: 0.8,
+    });
+    if (!result.canceled && result.assets[0] && user?.id) {
+      setUploadingMedia(true);
+      const asset = result.assets[0];
+      const mimeType = asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg');
+      const url = await uploadChatMedia(asset.uri, user.id, mimeType);
+      setUploadingMedia(false);
+      if (url) {
+        await handleSend(url, asset.type === 'video' ? 'video' : 'image');
+      } else {
+        Alert.alert('Error', 'No se pudo subir el archivo.');
+      }
+    }
+  };
+
+  const pickFromCamera = async () => {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') { Alert.alert('Permiso requerido'); return; }
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      quality: 0.8,
+    });
+    if (!result.canceled && result.assets[0] && user?.id) {
+      setUploadingMedia(true);
+      const asset = result.assets[0];
+      const url = await uploadChatMedia(asset.uri, user.id, 'image/jpeg');
+      setUploadingMedia(false);
+      if (url) await handleSend(url, 'image');
+    }
+  };
+
+  const showAttachOptions = () => {
+    Alert.alert('Adjuntar', 'Elige una fuente', [
+      { text: 'Cámara', onPress: pickFromCamera },
+      { text: 'Galería', onPress: pickAndSendImage },
+      { text: 'Cancelar', style: 'cancel' },
+    ]);
+  };
 
   if (!conversation && !loadingMessages) {
     return (
       <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
-        <Text style={{ color: Colors.textMuted }}>Conversacion no encontrada</Text>
+        <Text style={{ color: Colors.textMuted }}>Conversación no encontrada</Text>
       </View>
     );
   }
 
   const otherUser = conversation?.other_user;
 
-  const renderMessage = ({ item }: { item: AppMessage }) => {
+  const renderMessage = ({ item, index }: { item: ChatMessage; index: number }) => {
     const isMe = item.sender_id === user?.id;
+    const isLast = index === messages.length - 1;
+    const showReadReceipt = isMe && isLast;
+
     return (
       <View style={[styles.messageRow, isMe ? styles.messageRowMe : null]}>
-        {!isMe && otherUser ? (
-          <Avatar uri={otherUser.avatar} size={28} />
-        ) : null}
-        {isMe ? (
-          <LinearGradient
-            colors={[Colors.primary, Colors.primaryDark]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={[styles.bubble, styles.bubbleMe]}
-          >
-            <Text style={styles.bubbleMeText}>{item.text}</Text>
-            <Text style={styles.bubbleTime}>{item.timestamp}</Text>
-          </LinearGradient>
-        ) : (
-          <View style={[styles.bubble, styles.bubbleThem]}>
-            <Text style={styles.bubbleThemText}>{item.text}</Text>
-            <Text style={[styles.bubbleTime, { color: Colors.textMuted }]}>{item.timestamp}</Text>
-          </View>
-        )}
+        {!isMe && otherUser ? <Avatar uri={otherUser.avatar} size={28} /> : null}
+
+        <View style={styles.bubbleWrapper}>
+          {isMe ? (
+            <LinearGradient
+              colors={[Colors.primary, Colors.primaryDark]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={[styles.bubble, styles.bubbleMe]}
+            >
+              {item.media_url && item.media_type_msg === 'image' ? (
+                <Image
+                  source={{ uri: item.media_url }}
+                  style={styles.chatMedia}
+                  contentFit="cover"
+                  transition={200}
+                />
+              ) : null}
+              {item.text && item.text !== '📷 Foto' && item.text !== '🎥 Video' ? (
+                <Text style={styles.bubbleMeText}>{item.text}</Text>
+              ) : item.media_url ? null : (
+                <Text style={styles.bubbleMeText}>{item.text}</Text>
+              )}
+              <View style={styles.bubbleMeta}>
+                <Text style={styles.bubbleTime}>{item.timestamp}</Text>
+                {showReadReceipt ? (
+                  <Ionicons
+                    name={item.read ? 'checkmark-done' : 'checkmark'}
+                    size={14}
+                    color={item.read ? Colors.info : 'rgba(255,255,255,0.5)'}
+                    style={{ marginLeft: 3 }}
+                  />
+                ) : null}
+              </View>
+            </LinearGradient>
+          ) : (
+            <View style={[styles.bubble, styles.bubbleThem]}>
+              {item.media_url && item.media_type_msg === 'image' ? (
+                <Image
+                  source={{ uri: item.media_url }}
+                  style={styles.chatMedia}
+                  contentFit="cover"
+                  transition={200}
+                />
+              ) : null}
+              {item.text && item.text !== '📷 Foto' && item.text !== '🎥 Video' ? (
+                <Text style={styles.bubbleThemText}>{item.text}</Text>
+              ) : item.media_url ? null : (
+                <Text style={styles.bubbleThemText}>{item.text}</Text>
+              )}
+              <Text style={[styles.bubbleTime, { color: Colors.textMuted }]}>{item.timestamp}</Text>
+            </View>
+          )}
+        </View>
       </View>
     );
   };
@@ -190,7 +316,7 @@ export default function ChatDetailScreen() {
               <View style={styles.headerInfo}>
                 <Text style={styles.headerName}>{otherUser.name}</Text>
                 <Text style={styles.headerStatus}>
-                  {conversation?.online ? 'En linea' : '@' + otherUser.username}
+                  {conversation?.online ? 'En línea' : '@' + otherUser.username}
                 </Text>
               </View>
             </>
@@ -206,6 +332,14 @@ export default function ChatDetailScreen() {
             <MaterialIcons name="more-vert" size={22} color={Colors.textSecondary} />
           </Pressable>
         </View>
+
+        {/* Upload indicator */}
+        {uploadingMedia ? (
+          <View style={styles.uploadIndicator}>
+            <ActivityIndicator color={Colors.primary} size="small" />
+            <Text style={styles.uploadIndicatorText}>Subiendo media...</Text>
+          </View>
+        ) : null}
 
         {/* Messages */}
         {loadingMessages ? (
@@ -224,16 +358,16 @@ export default function ChatDetailScreen() {
             ListEmptyComponent={
               <View style={styles.emptyMessages}>
                 <Text style={{ color: Colors.textMuted, fontSize: FontSize.base }}>
-                  Empieza la conversacion! 👋
+                  ¡Empieza la conversación! 👋
                 </Text>
               </View>
             }
           />
         )}
 
-        {/* Input */}
+        {/* Input bar */}
         <View style={[styles.inputBar, { paddingBottom: insets.bottom + 8 }]}>
-          <Pressable style={styles.attachBtn} hitSlop={8}>
+          <Pressable style={styles.attachBtn} hitSlop={8} onPress={showAttachOptions}>
             <Ionicons name="add-circle-outline" size={26} color={Colors.primary} />
           </Pressable>
           <TextInput
@@ -247,11 +381,15 @@ export default function ChatDetailScreen() {
           />
           <Pressable
             style={[styles.sendBtn, !inputText.trim() ? styles.sendBtnDisabled : null]}
-            onPress={handleSend}
+            onPress={() => handleSend()}
             disabled={!inputText.trim() || sending}
           >
             <LinearGradient
-              colors={inputText.trim() ? [Colors.primary, Colors.secondary] : [Colors.surfaceElevated, Colors.surfaceElevated]}
+              colors={
+                inputText.trim()
+                  ? [Colors.primary, Colors.secondary]
+                  : [Colors.surfaceElevated, Colors.surfaceElevated]
+              }
               style={styles.sendBtnGradient}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 1 }}
@@ -291,6 +429,15 @@ const styles = StyleSheet.create({
   headerName: { fontSize: FontSize.base, fontWeight: FontWeight.semibold, color: Colors.textPrimary },
   headerStatus: { fontSize: FontSize.xs, color: Colors.textMuted, marginTop: 1 },
   headerAction: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
+  uploadIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 6,
+    backgroundColor: Colors.surfaceElevated,
+  },
+  uploadIndicatorText: { fontSize: FontSize.sm, color: Colors.textSecondary },
   loadingMessages: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   emptyMessages: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: Spacing.xxl },
   messagesList: {
@@ -306,12 +453,20 @@ const styles = StyleSheet.create({
     maxWidth: '85%',
   },
   messageRowMe: { alignSelf: 'flex-end', flexDirection: 'row-reverse' },
-  bubble: { padding: Spacing.sm + 4, borderRadius: Radii.lg, maxWidth: '100%', gap: 4 },
+  bubbleWrapper: { maxWidth: '100%' },
+  bubble: { padding: Spacing.sm + 2, borderRadius: Radii.lg, gap: 4 },
   bubbleMe: { borderBottomRightRadius: 4 },
   bubbleThem: { backgroundColor: Colors.surfaceElevated, borderBottomLeftRadius: 4 },
   bubbleMeText: { color: '#fff', fontSize: FontSize.base, lineHeight: 22 },
   bubbleThemText: { color: Colors.textPrimary, fontSize: FontSize.base, lineHeight: 22 },
+  bubbleMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' },
   bubbleTime: { fontSize: FontSize.xs, color: 'rgba(255,255,255,0.6)', textAlign: 'right' },
+  chatMedia: {
+    width: 200,
+    height: 160,
+    borderRadius: Radii.sm,
+    marginBottom: 4,
+  },
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',

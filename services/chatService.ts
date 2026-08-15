@@ -121,11 +121,16 @@ export async function fetchMessages(conversationId: string): Promise<AppMessage[
 export async function sendMessage(
   conversationId: string,
   senderId: string,
-  text: string
+  text: string,
+  mediaUrl?: string,
+  mediaType?: string
 ): Promise<{ data: AppMessage | null; error: string | null }> {
+  const payload: any = { conversation_id: conversationId, sender_id: senderId, text };
+  if (mediaUrl) payload.media_url = mediaUrl;
+  if (mediaType) payload.media_type = mediaType;
   const { data, error } = await supabase
     .from('messages')
-    .insert({ conversation_id: conversationId, sender_id: senderId, text })
+    .insert(payload)
     .select('*')
     .single();
 
@@ -147,6 +152,8 @@ export async function sendMessage(
       read: msg.read,
       created_at: msg.created_at,
       timestamp: formatMessageTime(msg.created_at),
+      media_url: (msg as any).media_url ?? undefined,
+      media_type: (msg as any).media_type ?? 'text',
     },
     error: null,
   };
