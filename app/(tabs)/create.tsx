@@ -70,6 +70,12 @@ type MediaAsset = {
   mimeType?: string;
 };
 
+type UploadProgressInfo = {
+  percentage: number;    // 0–100
+  uploadedBytes: number;
+  totalBytes: number;
+};
+
 // ─── VideoPreview ─────────────────────────────────────────────────────────────
 
 function VideoPreview({ uri }: { uri: string }) {
@@ -88,32 +94,29 @@ function VideoPreview({ uri }: { uri: string }) {
   );
 }
 
-// ─── Upload helper ────────────────────────────────────────────────────────────
-// Architecture note:
-// - Web: fetch() + blob works correctly.
-// - Native images: fetch() + FileReader works for small-to-medium files.
-// - Native videos: fetch() on a content:// or file:// URI can produce an
-//   empty/truncated ArrayBuffer for large files. We must use
-//   expo-file-system readAsStringAsync (base64) and decode manually to
-//   guarantee the full byte sequence reaches Supabase Storage.
+// ─── Upload helpers ────────────────────────────────────────────────────────────
 
-function base64ToUint8Array(base64: string): Uint8Array {
-  const binaryString = atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes;
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+// Architecture:
+// • Native VIDEO  → FileSystem.uploadAsync (RAW) with uploadProgressCallback
+//                   for real byte-level progress reporting. Avoids
+//                   readAsStringAsync truncation on large files.
+// • Native IMAGE  → fetch + FileReader (reliable for images); simulated
+//                   progress steps since FileReader has no progress API.
+// • Web           → XMLHttpRequest with upload.onprogress for real progress.
 
 async function uploadMedia(
   asset: MediaAsset,
-  userId: string
+  userId: string,
+  onProgress?: (info: UploadProgressInfo) => void
 ): Promise<{ url: string | null; error: string | null }> {
   try {
-    // Derive extension: prefer mimeType, fall back per media type.
-    // Handle QuickTime .mov → store as mp4-compatible key.
     const rawExt = asset.mimeType?.split('/')[1];
     const ext = rawExt === 'quicktime' ? 'mov' : rawExt ?? (asset.type === 'video' ? 'mp4' : 'jpg');
     const fileName = `${userId}/${Date.now()}.${ext}`;
@@ -121,40 +124,108 @@ async function uploadMedia(
 
     console.log('[uploadMedia] Starting upload:', { uri: asset.uri, mimeType, fileName });
 
+    // ── Get file size upfront (best-effort, non-fatal) ───────────────────────
+    let totalBytes = 0;
+    if (Platform.OS !== 'web') {
+      try {
+        const info = await FileSystem.getInfoAsync(asset.uri, { size: true });
+        totalBytes = (info as any).size ?? 0;
+        console.log('[uploadMedia] File size:', formatBytes(totalBytes));
+      } catch {
+        // Progress will show 0 total if size is unavailable
+      }
+    }
+
+    // ── Auth token for direct Storage REST calls ─────────────────────────────
+    const { data: { session } } = await supabase.auth.getSession();
+    const authToken = session?.access_token ?? (process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '');
+    const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
+    const storageUrl = `${supabaseUrl}/storage/v1/object/posts-media/${fileName}`;
+
     if (Platform.OS === 'web') {
-      // Web: standard fetch + blob path.
+      // ── Web: XMLHttpRequest with upload.onprogress ───────────────────────────
       const response = await fetch(asset.uri);
       const blob = await response.blob();
-      console.log('[uploadMedia] Web blob size:', blob.size);
-      const { error } = await supabase.storage
-        .from('posts-media')
-        .upload(fileName, blob, { contentType: mimeType, upsert: false });
-      if (error) {
-        console.error('[uploadMedia] Supabase error (web):', error.message, (error as any).details);
-        return { url: null, error: error.message };
-      }
-    } else if (asset.type === 'video') {
-      // Native video: use expo-file-system to read as base64 to avoid
-      // fetch() truncation on large content:// or file:// URIs.
-      console.log('[uploadMedia] Native video — using FileSystem.readAsStringAsync');
-      const base64 = await FileSystem.readAsStringAsync(asset.uri, {
-        encoding: FileSystem.EncodingType.Base64,
+      const webTotal = blob.size;
+      console.log('[uploadMedia] Web blob size:', formatBytes(webTotal));
+
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            onProgress?.({
+              percentage: Math.round((e.loaded / e.total) * 100),
+              uploadedBytes: e.loaded,
+              totalBytes: e.total,
+            });
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error(`Upload failed: ${xhr.status} ${xhr.responseText}`));
+        };
+        xhr.onerror = () => reject(new Error('XHR network error'));
+        xhr.open('POST', storageUrl);
+        xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+        xhr.setRequestHeader('Content-Type', mimeType);
+        xhr.setRequestHeader('x-upsert', 'false');
+        xhr.send(blob);
       });
-      console.log('[uploadMedia] Base64 length:', base64.length);
-      const uint8Array = base64ToUint8Array(base64);
-      console.log('[uploadMedia] Uint8Array byte length:', uint8Array.byteLength);
-      const { error } = await supabase.storage
-        .from('posts-media')
-        .upload(fileName, uint8Array, { contentType: mimeType, upsert: false });
-      if (error) {
-        console.error('[uploadMedia] Supabase error (native video):', error.message, (error as any).details);
-        return { url: null, error: error.message };
+
+    } else if (asset.type === 'video') {
+      // ── Native video: FileSystem.uploadAsync with real progress callback ─────
+      // This avoids fetch()/readAsStringAsync truncation AND gives byte-level
+      // progress without loading the entire video into JS memory first.
+      console.log('[uploadMedia] Native video — FileSystem.uploadAsync (RAW)');
+      onProgress?.({ percentage: 0, uploadedBytes: 0, totalBytes });
+
+      const uploadResult = await FileSystem.uploadAsync(storageUrl, asset.uri, {
+        uploadType: FileSystem.FileSystemUploadType.RAW,
+        httpMethod: 'POST',
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          'Content-Type': mimeType,
+          'x-upsert': 'false',
+        },
+        uploadProgressCallback: (bytesUploaded: number, bytesTotal: number) => {
+          const resolvedTotal = bytesTotal > 0 ? bytesTotal : totalBytes;
+          const pct =
+            resolvedTotal > 0
+              ? Math.min(99, Math.round((bytesUploaded / resolvedTotal) * 100))
+              : 0;
+          onProgress?.({
+            percentage: pct,
+            uploadedBytes: bytesUploaded,
+            totalBytes: resolvedTotal,
+          });
+        },
+      });
+
+      console.log('[uploadMedia] FileSystem.uploadAsync status:', uploadResult.status);
+      if (uploadResult.status < 200 || uploadResult.status >= 300) {
+        console.error('[uploadMedia] Upload error body:', uploadResult.body);
+        return {
+          url: null,
+          error: `Upload failed (${uploadResult.status}): ${uploadResult.body}`,
+        };
       }
+      onProgress?.({ percentage: 100, uploadedBytes: totalBytes, totalBytes });
+
     } else {
-      // Native image: fetch + FileReader path (reliable for images).
+      // ── Native image: fetch + FileReader (reliable; simulate progress steps) ─
+      onProgress?.({ percentage: 5, uploadedBytes: 0, totalBytes });
+
       const response = await fetch(asset.uri);
       const blob = await response.blob();
-      console.log('[uploadMedia] Native image blob size:', blob.size);
+      const imageTotal = blob.size;
+      console.log('[uploadMedia] Native image blob size:', formatBytes(imageTotal));
+
+      onProgress?.({
+        percentage: 35,
+        uploadedBytes: Math.round(imageTotal * 0.35),
+        totalBytes: imageTotal,
+      });
+
       const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result as ArrayBuffer);
@@ -164,14 +235,23 @@ async function uploadMedia(
         };
         reader.readAsArrayBuffer(blob);
       });
-      console.log('[uploadMedia] ArrayBuffer byte length:', arrayBuffer.byteLength);
+
+      onProgress?.({
+        percentage: 65,
+        uploadedBytes: Math.round(imageTotal * 0.65),
+        totalBytes: imageTotal,
+      });
+
       const { error } = await supabase.storage
         .from('posts-media')
         .upload(fileName, arrayBuffer, { contentType: mimeType, upsert: false });
+
       if (error) {
         console.error('[uploadMedia] Supabase error (native image):', error.message, (error as any).details);
         return { url: null, error: error.message };
       }
+
+      onProgress?.({ percentage: 100, uploadedBytes: imageTotal, totalBytes: imageTotal });
     }
 
     const { data } = supabase.storage.from('posts-media').getPublicUrl(fileName);
@@ -183,15 +263,155 @@ async function uploadMedia(
   }
 }
 
+// ─── UploadProgressBar ────────────────────────────────────────────────────────
+
+function UploadProgressBar({
+  progress,
+  info,
+}: {
+  progress: number;
+  info: UploadProgressInfo | null;
+}) {
+  // Animate the fill width with a spring
+  const fillAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.spring(fillAnim, {
+      toValue: progress,
+      useNativeDriver: false,
+      tension: 40,
+      friction: 8,
+    }).start();
+  }, [progress]);
+
+  const fillWidth = fillAnim.interpolate({
+    inputRange: [0, 100],
+    outputRange: ['0%', '100%'],
+    extrapolate: 'clamp',
+  });
+
+  const isVideo = info !== null && info.totalBytes > 500 * 1024; // >500 KB → video-like
+  const barColor = isVideo ? Colors.info : Colors.primary;
+
+  return (
+    <View style={progressStyles.container}>
+      {/* Track */}
+      <View style={progressStyles.track}>
+        <Animated.View
+          style={[progressStyles.fill, { width: fillWidth as any, backgroundColor: barColor }]}
+        />
+        {/* Shimmer overlay */}
+        <View style={[progressStyles.shimmer, { backgroundColor: barColor + '33' }]} />
+      </View>
+
+      {/* Info row */}
+      <View style={progressStyles.infoRow}>
+        <View style={progressStyles.infoLeft}>
+          <ActivityIndicator
+            size="small"
+            color={barColor}
+            style={progressStyles.spinner}
+          />
+          <Text style={progressStyles.label}>
+            {progress < 100 ? 'Subiendo...' : 'Procesando...'}
+          </Text>
+        </View>
+
+        {info && info.totalBytes > 0 ? (
+          <View style={progressStyles.infoRight}>
+            <Text style={[progressStyles.bytes, { color: Colors.textSecondary }]}>
+              {formatBytes(info.uploadedBytes)}
+              <Text style={progressStyles.separator}> / </Text>
+              {formatBytes(info.totalBytes)}
+            </Text>
+            <View style={[progressStyles.pctBadge, { backgroundColor: barColor + '22' }]}>
+              <Text style={[progressStyles.pct, { color: barColor }]}>
+                {progress}%
+              </Text>
+            </View>
+          </View>
+        ) : (
+          <View style={[progressStyles.pctBadge, { backgroundColor: barColor + '22' }]}>
+            <Text style={[progressStyles.pct, { color: barColor }]}>
+              {progress}%
+            </Text>
+          </View>
+        )}
+      </View>
+    </View>
+  );
+}
+
+const progressStyles = StyleSheet.create({
+  container: {
+    backgroundColor: Colors.surfaceElevated,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.surfaceBorder,
+  },
+  track: {
+    height: 5,
+    backgroundColor: Colors.surface,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  fill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  shimmer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  infoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 7,
+  },
+  infoLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  spinner: { transform: [{ scale: 0.7 }] },
+  label: {
+    fontSize: FontSize.xs,
+    color: Colors.textMuted,
+    fontWeight: FontWeight.medium,
+  },
+  infoRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  bytes: {
+    fontSize: FontSize.xs,
+    fontWeight: FontWeight.medium,
+  },
+  separator: {
+    color: Colors.textMuted,
+  },
+  pctBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: Radii.full,
+  },
+  pct: {
+    fontSize: FontSize.xs,
+    fontWeight: FontWeight.bold,
+  },
+});
+
 // ─── CharacterRing ────────────────────────────────────────────────────────────
 
 function CharacterRing({ count, max }: { count: number; max: number }) {
   const ratio = count / max;
   const size = 28;
   const strokeWidth = 3;
-  const radius = (size - strokeWidth) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const strokeDashoffset = circumference * (1 - ratio);
   const remaining = max - count;
 
   const color =
@@ -199,7 +419,6 @@ function CharacterRing({ count, max }: { count: number; max: number }) {
 
   return (
     <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
-      {/* Background track */}
       <View
         style={{
           position: 'absolute',
@@ -210,7 +429,6 @@ function CharacterRing({ count, max }: { count: number; max: number }) {
           borderColor: Colors.surfaceBorder,
         }}
       />
-      {/* Filled arc approximation using opacity */}
       <View
         style={{
           position: 'absolute',
@@ -413,6 +631,7 @@ export default function CreateScreen() {
   const [audience, setAudience] = useState('public');
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadProgressInfo, setUploadProgressInfo] = useState<UploadProgressInfo | null>(null);
   const [showAudience, setShowAudience] = useState(false);
 
   // Animate media panel in
@@ -439,13 +658,15 @@ export default function CreateScreen() {
     );
   };
 
-  const handleReset = () => {
+  const handleReset = useCallback(() => {
     setContent('');
     setSelectedTags([]);
     setMedia(null);
     setActiveFilter('none');
     setAudience('public');
-  };
+    setUploadProgress(0);
+    setUploadProgressInfo(null);
+  }, []);
 
   const pickMedia = useCallback(async (source: 'camera' | 'gallery', forceVideo = false) => {
     if (source === 'camera') {
@@ -464,10 +685,7 @@ export default function CreateScreen() {
       if (!result.canceled && result.assets[0]) {
         const asset = result.assets[0];
         const detectedType = asset.type === 'video' ? 'video' : 'image';
-        // Resolve mimeType: expo-image-picker sometimes returns undefined for videos.
-        // For .mov files we keep the correct quicktime type so the upload extension is right.
-        const mimeType = asset.mimeType
-          ?? (detectedType === 'video' ? 'video/mp4' : 'image/jpeg');
+        const mimeType = asset.mimeType ?? (detectedType === 'video' ? 'video/mp4' : 'image/jpeg');
         console.log('[pickMedia] camera asset:', { uri: asset.uri, type: detectedType, mimeType });
         setMedia({ uri: asset.uri, type: detectedType, mimeType });
         setActiveFilter('none');
@@ -482,8 +700,6 @@ export default function CreateScreen() {
         return;
       }
       const result = await ImagePicker.launchImageLibraryAsync({
-        // When forceVideo is true we restrict to videos only so the picker
-        // title and filter shows "Videos" correctly on both platforms.
         mediaTypes: forceVideo ? ['videos'] : ['images', 'videos'],
         allowsEditing: true,
         quality: 0.85,
@@ -493,8 +709,7 @@ export default function CreateScreen() {
       if (!result.canceled && result.assets[0]) {
         const asset = result.assets[0];
         const detectedType = asset.type === 'video' ? 'video' : 'image';
-        const mimeType = asset.mimeType
-          ?? (detectedType === 'video' ? 'video/mp4' : 'image/jpeg');
+        const mimeType = asset.mimeType ?? (detectedType === 'video' ? 'video/mp4' : 'image/jpeg');
         console.log('[pickMedia] gallery asset:', { uri: asset.uri, type: detectedType, mimeType });
         setMedia({ uri: asset.uri, type: detectedType, mimeType });
         setActiveFilter('none');
@@ -507,21 +722,28 @@ export default function CreateScreen() {
     if (!profile?.id) return;
 
     setLoading(true);
-    setUploadProgress(10);
+    setUploadProgress(0);
+    setUploadProgressInfo(null);
 
     let imageUrl: string | undefined;
     let videoUrl: string | undefined;
 
     if (media) {
-      setUploadProgress(30);
-      const { url, error: uploadError } = await uploadMedia(media, profile.id);
+      const { url, error: uploadError } = await uploadMedia(
+        media,
+        profile.id,
+        (info) => {
+          setUploadProgress(info.percentage);
+          setUploadProgressInfo(info);
+        }
+      );
       if (uploadError || !url) {
         setLoading(false);
         setUploadProgress(0);
+        setUploadProgressInfo(null);
         Alert.alert('Error al subir', uploadError ?? 'Error desconocido. Intenta de nuevo.');
         return;
       }
-      setUploadProgress(75);
       if (media.type === 'video') {
         videoUrl = url;
       } else {
@@ -529,7 +751,9 @@ export default function CreateScreen() {
       }
     }
 
-    setUploadProgress(90);
+    // Brief publishing step
+    setUploadProgress(100);
+
     const finalContent = [
       content.trim(),
       selectedTags.map(id => MOOD_TAGS.find(t => t.id === id)?.label).filter(Boolean).join(' '),
@@ -540,6 +764,7 @@ export default function CreateScreen() {
     const { error } = await addPost(finalContent, imageUrl, videoUrl);
     setLoading(false);
     setUploadProgress(0);
+    setUploadProgressInfo(null);
 
     if (error) {
       Alert.alert('Error al publicar', error);
@@ -550,7 +775,7 @@ export default function CreateScreen() {
       { text: 'Ver Feed', onPress: () => { handleReset(); router.push('/(tabs)/'); } },
       { text: 'Nuevo post', onPress: handleReset, style: 'cancel' },
     ]);
-  }, [canPublish, profile, media, content, selectedTags, addPost, router]);
+  }, [canPublish, profile, media, content, selectedTags, addPost, router, handleReset]);
 
   const currentFilter = FILTERS.find(f => f.id === activeFilter) ?? FILTERS[0];
   const selectedAudience = AUDIENCE_OPTIONS.find(a => a.id === audience) ?? AUDIENCE_OPTIONS[0];
@@ -601,16 +826,9 @@ export default function CreateScreen() {
           </Pressable>
         </View>
 
-        {/* ── Upload progress ──────────────────────────────────────────────── */}
+        {/* ── Upload progress bar ──────────────────────────────────────────── */}
         {loading ? (
-          <View style={styles.progressTrack}>
-            <Animated.View
-              style={[
-                styles.progressFill,
-                { width: `${uploadProgress}%` as any },
-              ]}
-            />
-          </View>
+          <UploadProgressBar progress={uploadProgress} info={uploadProgressInfo} />
         ) : null}
 
         {/* ── Content scroll ──────────────────────────────────────────────── */}
@@ -937,18 +1155,6 @@ const styles = StyleSheet.create({
     fontSize: FontSize.base,
   },
   publishDisabled: { color: Colors.textMuted },
-
-  // Progress
-  progressTrack: {
-    height: 3,
-    backgroundColor: Colors.surfaceElevated,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: 3,
-    backgroundColor: Colors.primary,
-    borderRadius: 2,
-  },
 
   // Scroll
   scroll: { flex: 1 },
