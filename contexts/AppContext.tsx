@@ -47,14 +47,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [user]);
 
   useEffect(() => {
-    if (user) {
+    if (user?.id) {
       refreshPosts();
       refreshConversations();
     } else {
       setPosts([]);
       setConversations([]);
     }
-  }, [user]);
+  }, [user?.id]);
 
   const toggleLike = useCallback(
     async (postId: string) => {

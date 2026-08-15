@@ -1,13 +1,30 @@
-import { Stack, Redirect } from 'expo-router';
+import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { View, ActivityIndicator } from 'react-native';
+import { useEffect } from 'react';
 import { AuthProvider, useAuthContext } from '@/contexts/AuthContext';
 import { AppProvider } from '@/contexts/AppContext';
 import { Colors } from '@/constants/theme';
 
-function AppRouter() {
+function AuthGate() {
   const { session, loading } = useAuthContext();
+  const router = useRouter();
+  const segments = useSegments();
+
+  useEffect(() => {
+    if (loading) return;
+
+    const inAuthGroup = segments[0] === 'auth';
+    const inTabsGroup = segments[0] === '(tabs)';
+    const inChatGroup = segments[0] === 'chat';
+
+    if (!session && !inAuthGroup) {
+      router.replace('/auth');
+    } else if (session && inAuthGroup) {
+      router.replace('/(tabs)');
+    }
+  }, [session, loading, segments]);
 
   if (loading) {
     return (
@@ -17,9 +34,14 @@ function AppRouter() {
     );
   }
 
+  return null;
+}
+
+function RootNavigator() {
   return (
     <>
       <StatusBar style="light" />
+      <AuthGate />
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="auth" options={{ headerShown: false }} />
@@ -28,7 +50,6 @@ function AppRouter() {
           options={{ headerShown: false, animation: 'slide_from_right' }}
         />
       </Stack>
-      {!session ? <Redirect href="/auth" /> : null}
     </>
   );
 }
@@ -38,7 +59,7 @@ export default function RootLayout() {
     <SafeAreaProvider>
       <AuthProvider>
         <AppProvider>
-          <AppRouter />
+          <RootNavigator />
         </AppProvider>
       </AuthProvider>
     </SafeAreaProvider>
