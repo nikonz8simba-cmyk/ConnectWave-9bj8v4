@@ -284,15 +284,17 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingVertical: 10,
     alignItems: 'center',
+    justifyContent: 'center',
     borderRadius: Radii.full,
+    minHeight: 44,
   },
   modeBtnActive: {
     backgroundColor: Colors.primary,
   },
   modeBtnText: {
     fontSize: FontSize.base,
-    fontWeight: FontWeight.medium,
-    color: Colors.textMuted,
+    fontWeight: FontWeight.semibold,
+    color: Colors.textSecondary,
   },
   modeBtnTextActive: {
     color: '#fff',
