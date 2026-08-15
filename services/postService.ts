@@ -4,7 +4,10 @@ import { mapDbProfileToAppUser } from './authService';
 
 export const FEED_PAGE_SIZE = 15;
 
-function formatTimestamp(dateStr: string): string {
+// ─── Timestamp helpers ───────────────────────────────────────────────────────
+
+/** Returns a short relative label: "ahora", "hace 5m", "hace 3h", "hace 2d" */
+function formatRelative(dateStr: string): string {
   const date = new Date(dateStr);
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
@@ -12,12 +15,27 @@ function formatTimestamp(dateStr: string): string {
   const diffMins = Math.floor(diffSecs / 60);
   const diffHours = Math.floor(diffMins / 60);
   const diffDays = Math.floor(diffHours / 24);
-
   if (diffSecs < 60) return 'ahora';
-  if (diffMins < 60) return `${diffMins}m`;
-  if (diffHours < 24) return `${diffHours}h`;
-  if (diffDays < 7) return `${diffDays}d`;
-  return date.toLocaleDateString('es', { month: 'short', day: 'numeric' });
+  if (diffMins < 60) return `hace ${diffMins}m`;
+  if (diffHours < 24) return `hace ${diffHours}h`;
+  if (diffDays < 7) return `hace ${diffDays}d`;
+  return `hace ${Math.floor(diffDays / 7)}sem`;
+}
+
+/** Returns a full absolute datetime: "15 ago 2026, 14:32" */
+function formatDatetime(dateStr: string): string {
+  const date = new Date(dateStr);
+  const datePart = date.toLocaleDateString('es-ES', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+  const timePart = date.toLocaleTimeString('es-ES', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  return `${datePart}, ${timePart}`;
 }
 
 function mapDbPostToAppPost(post: DbPost, likedPostIds: Set<string>): AppPost {
@@ -34,7 +52,8 @@ function mapDbPostToAppPost(post: DbPost, likedPostIds: Set<string>): AppPost {
     shares_count: post.shares_count,
     created_at: post.created_at,
     liked: likedPostIds.has(post.id),
-    timestamp: formatTimestamp(post.created_at),
+    timestamp: formatRelative(post.created_at),
+    datetime: formatDatetime(post.created_at),
     score: (post as any).score,
   };
 }

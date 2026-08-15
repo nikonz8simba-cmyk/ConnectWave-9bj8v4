@@ -28,10 +28,12 @@ function formatTimestamp(dateStr: string): string {
   const diffHours = Math.floor(diffMins / 60);
   const diffDays = Math.floor(diffHours / 24);
   if (diffSecs < 60) return 'ahora';
-  if (diffMins < 60) return `${diffMins}m`;
-  if (diffHours < 24) return `${diffHours}h`;
-  if (diffDays < 7) return `${diffDays}d`;
-  return date.toLocaleDateString('es', { month: 'short', day: 'numeric' });
+  if (diffMins < 60) return `hace ${diffMins}m`;
+  if (diffHours < 24) return `hace ${diffHours}h`;
+  if (diffDays < 7) return `hace ${diffDays}d`;
+  const datePart = date.toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' });
+  const timePart = date.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: false });
+  return `${datePart}, ${timePart}`;
 }
 
 // ─── Fetch notifications ──────────────────────────────────────────────────────

@@ -2,7 +2,9 @@ import { supabase } from '@/lib/supabase';
 import { AppComment, DbComment, DbUserProfile } from '@/types/database';
 import { mapDbProfileToAppUser } from './authService';
 
-function formatTimestamp(dateStr: string): string {
+// ─── Timestamp helpers ───────────────────────────────────────────────────────
+
+function formatRelative(dateStr: string): string {
   const date = new Date(dateStr);
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
@@ -10,12 +12,26 @@ function formatTimestamp(dateStr: string): string {
   const diffMins = Math.floor(diffSecs / 60);
   const diffHours = Math.floor(diffMins / 60);
   const diffDays = Math.floor(diffHours / 24);
-
   if (diffSecs < 60) return 'ahora';
-  if (diffMins < 60) return `${diffMins}m`;
-  if (diffHours < 24) return `${diffHours}h`;
-  if (diffDays < 7) return `${diffDays}d`;
-  return date.toLocaleDateString('es', { month: 'short', day: 'numeric' });
+  if (diffMins < 60) return `hace ${diffMins}m`;
+  if (diffHours < 24) return `hace ${diffHours}h`;
+  if (diffDays < 7) return `hace ${diffDays}d`;
+  return `hace ${Math.floor(diffDays / 7)}sem`;
+}
+
+function formatDatetime(dateStr: string): string {
+  const date = new Date(dateStr);
+  const datePart = date.toLocaleDateString('es-ES', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+  const timePart = date.toLocaleTimeString('es-ES', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  return `${datePart}, ${timePart}`;
 }
 
 export async function fetchComments(postId: string): Promise<AppComment[]> {
@@ -33,7 +49,8 @@ export async function fetchComments(postId: string): Promise<AppComment[]> {
     user: mapDbProfileToAppUser(c.user_profiles as DbUserProfile),
     content: c.content,
     created_at: c.created_at,
-    timestamp: formatTimestamp(c.created_at),
+    timestamp: formatRelative(c.created_at),
+    datetime: formatDatetime(c.created_at),
   }));
 }
 
@@ -58,7 +75,8 @@ export async function addComment(
       user: mapDbProfileToAppUser(c.user_profiles as DbUserProfile),
       content: c.content,
       created_at: c.created_at,
-      timestamp: formatTimestamp(c.created_at),
+      timestamp: formatRelative(c.created_at),
+      datetime: formatDatetime(c.created_at),
     },
     error: null,
   };

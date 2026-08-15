@@ -84,7 +84,10 @@ export interface AppPost {
   shares_count: number;
   created_at: string;
   liked: boolean;
+  /** Relative label e.g. "hace 2h" */
   timestamp: string;
+  /** Absolute datetime e.g. "15 ago 2026, 14:32" */
+  datetime: string;
   score?: number;
 }
 
@@ -115,7 +118,10 @@ export interface AppComment {
   user: AppUser;
   content: string;
   created_at: string;
+  /** Relative label e.g. "hace 5m" */
   timestamp: string;
+  /** Absolute datetime e.g. "15 ago 2026, 14:32" */
+  datetime: string;
 }
 
 export interface AppConversation {

@@ -47,7 +47,6 @@ function CommentItem({ comment, currentUserId, onDelete }: CommentItemProps) {
           {comment.user.verified ? (
             <MaterialIcons name="verified" size={12} color={Colors.primary} />
           ) : null}
-          <Text style={itemStyles.time}>{comment.timestamp}</Text>
           {isOwn ? (
             <Pressable
               onPress={() => onDelete(comment.id)}
@@ -59,6 +58,12 @@ function CommentItem({ comment, currentUserId, onDelete }: CommentItemProps) {
           ) : null}
         </View>
         <MentionText text={comment.content} style={itemStyles.content} />
+        <View style={itemStyles.timeRow}>
+          <Ionicons name="time-outline" size={10} color={Colors.textMuted} />
+          <Text style={itemStyles.timeRelative}>{comment.timestamp}</Text>
+          <Text style={itemStyles.timeDot}>·</Text>
+          <Text style={itemStyles.timeAbsolute}>{comment.datetime}</Text>
+        </View>
       </View>
     </View>
   );
@@ -93,6 +98,26 @@ const itemStyles = StyleSheet.create({
     fontSize: FontSize.base,
     color: Colors.textSecondary,
     lineHeight: 22,
+  },
+  timeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 2,
+    flexWrap: 'wrap',
+  },
+  timeRelative: {
+    fontSize: FontSize.xs,
+    color: Colors.primary,
+    fontWeight: FontWeight.semibold,
+  },
+  timeDot: {
+    fontSize: FontSize.xs,
+    color: Colors.textMuted,
+  },
+  timeAbsolute: {
+    fontSize: FontSize.xs,
+    color: Colors.textMuted,
   },
 });
 
@@ -260,6 +285,7 @@ export function CommentsBottomSheet({
       content: text,
       created_at: new Date().toISOString(),
       timestamp: 'ahora',
+      datetime: new Date().toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' }) + ', ' + new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: false }),
     };
 
     setComments(prev => [...prev, optimistic]);

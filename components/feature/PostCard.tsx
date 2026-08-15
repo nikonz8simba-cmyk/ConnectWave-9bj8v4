@@ -115,7 +115,13 @@ export const PostCard = React.memo(function PostCard({ post, onLike, onDeleted }
               <MaterialIcons name="verified" size={14} color={Colors.primary} style={{ marginLeft: 4 }} />
             ) : null}
           </View>
-          <Text style={styles.username}>@{post.user.username} · {post.timestamp}</Text>
+          <Text style={styles.username}>@{post.user.username}</Text>
+          <View style={styles.timeRow}>
+            <Ionicons name="time-outline" size={11} color={Colors.textMuted} />
+            <Text style={styles.timestampRelative}>{post.timestamp}</Text>
+            <Text style={styles.timeDot}>·</Text>
+            <Text style={styles.timestampAbsolute}>{post.datetime}</Text>
+          </View>
         </View>
         <Pressable hitSlop={8} style={styles.moreBtn} onPress={() => setOptionsOpen(true)}>
           <MaterialIcons name="more-horiz" size={20} color={Colors.textMuted} />
@@ -219,6 +225,27 @@ const styles = StyleSheet.create({
   nameRow: { flexDirection: 'row', alignItems: 'center' },
   name: { fontSize: FontSize.base, fontWeight: FontWeight.semibold, color: Colors.textPrimary, flex: 1 },
   username: { fontSize: FontSize.sm, color: Colors.textMuted, marginTop: 2 },
+  timeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 3,
+    flexWrap: 'wrap',
+  },
+  timestampRelative: {
+    fontSize: FontSize.xs,
+    color: Colors.primary,
+    fontWeight: FontWeight.semibold,
+  },
+  timeDot: {
+    fontSize: FontSize.xs,
+    color: Colors.textMuted,
+  },
+  timestampAbsolute: {
+    fontSize: FontSize.xs,
+    color: Colors.textMuted,
+    fontWeight: FontWeight.regular,
+  },
   moreBtn: { padding: Spacing.xs },
   content: {
     fontSize: FontSize.base,
