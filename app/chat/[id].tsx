@@ -72,7 +72,7 @@ export default function ChatDetailScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
-  const { conversations, updateConversationOptimistic } = useApp();
+  const { conversations, updateConversationOptimistic, markConversationRead } = useApp();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [loadingMessages, setLoadingMessages] = useState(true);
@@ -92,7 +92,10 @@ export default function ChatDetailScreen() {
   }, [id]);
 
   useEffect(() => {
-    if (id && user?.id) markMessagesRead(id, user.id);
+    if (id && user?.id) {
+      markMessagesRead(id, user.id);
+      markConversationRead(id);
+    }
   }, [id, user]);
 
   useEffect(() => {

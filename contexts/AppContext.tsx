@@ -1,4 +1,4 @@
-import React, { createContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { createContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { useAuthContext } from '@/contexts/AuthContext';
 import { AppPost, AppConversation } from '@/types/database';
 import {
@@ -7,6 +7,7 @@ import {
   createPost as createPostService,
 } from '@/services/postService';
 import { fetchConversations } from '@/services/chatService';
+import { supabase } from '@/lib/supabase';
 
 interface AppContextType {
   posts: AppPost[];
@@ -22,12 +23,13 @@ interface AppContextType {
   toggleLike: (postId: string) => Promise<void>;
   addPost: (content: string, imageUrl?: string, videoUrl?: string) => Promise<{ error: string | null }>;
   updateConversationOptimistic: (conversationId: string, updates: Partial<AppConversation>) => void;
+  markConversationRead: (conversationId: string) => void;
 }
 
 export const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export function AppProvider({ children }: { children: ReactNode }) {
-  const { user, profile } = useAuthContext();
+  const { user } = useAuthContext();
   const [posts, setPosts] = useState<AppPost[]>([]);
   const [conversations, setConversations] = useState<AppConversation[]>([]);
   const [loadingPosts, setLoadingPosts] = useState(false);
@@ -35,6 +37,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [hasMorePosts, setHasMorePosts] = useState(true);
   const [feedOffset, setFeedOffset] = useState(0);
   const [loadingChats, setLoadingChats] = useState(false);
+  const realtimeChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  // ── Feed ───────────────────────────────────────────────────────────────
 
   const refreshPosts = useCallback(async () => {
     if (!user) return;
@@ -61,6 +66,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setLoadingMorePosts(false);
   }, [user, feedOffset, loadingMorePosts, hasMorePosts]);
 
+  // ── Conversations ──────────────────────────────────────────────────────
+
   const refreshConversations = useCallback(async () => {
     if (!user) return;
     setLoadingChats(true);
@@ -68,6 +75,53 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setConversations(data);
     setLoadingChats(false);
   }, [user]);
+
+  // ── Real-time: listen for new/updated messages, refresh conversation list ─
+
+  useEffect(() => {
+    if (!user?.id) return;
+
+    // Clean up previous channel
+    if (realtimeChannelRef.current) {
+      supabase.removeChannel(realtimeChannelRef.current);
+    }
+
+    const channel = supabase
+      .channel(`app_messages_${user.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+        },
+        () => {
+          // Refresh conversations to update last message + unread counts
+          refreshConversations();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'messages',
+        },
+        () => {
+          refreshConversations();
+        }
+      )
+      .subscribe();
+
+    realtimeChannelRef.current = channel;
+
+    return () => {
+      supabase.removeChannel(channel);
+      realtimeChannelRef.current = null;
+    };
+  }, [user?.id, refreshConversations]);
+
+  // ── Bootstrap ──────────────────────────────────────────────────────────
 
   useEffect(() => {
     if (user?.id) {
@@ -79,6 +133,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [user?.id]);
 
+  // ── Actions ────────────────────────────────────────────────────────────
+
   const toggleLike = useCallback(
     async (postId: string) => {
       if (!user) return;
@@ -87,24 +143,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
       // Optimistic update
       setPosts(prev =>
-        prev.map(p => {
-          if (p.id !== postId) return p;
-          return {
-            ...p,
-            liked: !p.liked,
-            likes_count: p.liked ? p.likes_count - 1 : p.likes_count + 1,
-          };
-        })
+        prev.map(p =>
+          p.id !== postId
+            ? p
+            : { ...p, liked: !p.liked, likes_count: p.liked ? p.likes_count - 1 : p.likes_count + 1 }
+        )
       );
 
       const { error } = await togglePostLike(postId, user.id, post.liked);
       if (error) {
         // Revert on error
         setPosts(prev =>
-          prev.map(p => {
-            if (p.id !== postId) return p;
-            return { ...p, liked: post.liked, likes_count: post.likes_count };
-          })
+          prev.map(p => (p.id !== postId ? p : { ...p, liked: post.liked, likes_count: post.likes_count }))
         );
       }
     },
@@ -134,6 +184,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     []
   );
 
+  const markConversationRead = useCallback((conversationId: string) => {
+    setConversations(prev =>
+      prev.map(c => (c.id === conversationId ? { ...c, unread: 0 } : c))
+    );
+  }, []);
+
   const totalUnread = conversations.reduce((sum, c) => sum + c.unread, 0);
 
   return (
@@ -152,6 +208,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         toggleLike,
         addPost,
         updateConversationOptimistic,
+        markConversationRead,
       }}
     >
       {children}

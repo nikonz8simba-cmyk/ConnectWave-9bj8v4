@@ -10,15 +10,23 @@ function formatTimestamp(dateStr: string): string {
   const diffHours = Math.floor(diffMins / 60);
   const diffDays = Math.floor(diffHours / 24);
 
-  if (diffMins < 1) return 'now';
+  if (diffMins < 1) return 'ahora';
   if (diffMins < 60) return `${diffMins}m`;
   if (diffHours < 24) return `${diffHours}h`;
   if (diffDays < 7) return `${diffDays}d`;
-  return date.toLocaleDateString();
+  return date.toLocaleDateString('es', { day: 'numeric', month: 'short' });
 }
 
 function formatMessageTime(dateStr: string): string {
   return new Date(dateStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function getLastMessagePreview(msg: any): string {
+  if (!msg) return '';
+  const mt = msg.media_type ?? 'text';
+  if (mt === 'image') return '📷 Foto';
+  if (mt === 'video') return '🎥 Video';
+  return msg.text ?? '';
 }
 
 export async function fetchConversations(currentUserId: string): Promise<AppConversation[]> {
@@ -30,70 +38,76 @@ export async function fetchConversations(currentUserId: string): Promise<AppConv
 
   if (partErr || !participantRows?.length) return [];
 
-  const convIds = participantRows.map((r: any) => r.conversation_id);
+  const convIds = participantRows.map((r: any) => r.conversation_id as string);
 
-  // Get other participants for each conversation
-  const { data: otherParts, error: othersErr } = await supabase
-    .from('conversation_participants')
-    .select('conversation_id, user_id, user_profiles(*)')
-    .in('conversation_id', convIds)
-    .neq('user_id', currentUserId);
-
-  if (othersErr || !otherParts) return [];
-
-  // Get last message for each conversation
-  const { data: conversations, error: convErr } = await supabase
-    .from('conversations')
-    .select('*')
-    .in('id', convIds)
-    .order('updated_at', { ascending: false });
-
-  if (convErr || !conversations) return [];
-
-  // Get last message per conversation
-  const lastMessagesPromises = convIds.map((id: string) =>
+  // Fetch other participants + their profiles, conversations metadata, in parallel
+  const [otherPartsRes, conversationsRes] = await Promise.all([
     supabase
-      .from('messages')
+      .from('conversation_participants')
+      .select('conversation_id, user_id, user_profiles(*)')
+      .in('conversation_id', convIds)
+      .neq('user_id', currentUserId),
+    supabase
+      .from('conversations')
       .select('*')
-      .eq('conversation_id', id)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-  );
+      .in('id', convIds)
+      .order('updated_at', { ascending: false }),
+  ]);
 
-  const lastMessagesResults = await Promise.all(lastMessagesPromises);
+  if (otherPartsRes.error || !otherPartsRes.data) return [];
+  if (conversationsRes.error || !conversationsRes.data) return [];
 
-  // Count unread per conversation
-  const unreadPromises = convIds.map((id: string) =>
-    supabase
-      .from('messages')
-      .select('id', { count: 'exact', head: true })
-      .eq('conversation_id', id)
-      .eq('read', false)
-      .neq('sender_id', currentUserId)
-  );
+  const otherParts = otherPartsRes.data;
+  const conversations = conversationsRes.data;
 
-  const unreadResults = await Promise.all(unreadPromises);
+  // Fetch last message and unread count per conversation in parallel
+  const [lastMessagesResults, unreadResults] = await Promise.all([
+    Promise.all(
+      convIds.map((id: string) =>
+        supabase
+          .from('messages')
+          .select('id, text, media_type, created_at, sender_id')
+          .eq('conversation_id', id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+      )
+    ),
+    Promise.all(
+      convIds.map((id: string) =>
+        supabase
+          .from('messages')
+          .select('id', { count: 'exact', head: true })
+          .eq('conversation_id', id)
+          .eq('read', false)
+          .neq('sender_id', currentUserId)
+      )
+    ),
+  ]);
 
   return conversations
-    .map((conv: any, idx: number) => {
+    .map((conv: any) => {
+      const convIdx = convIds.indexOf(conv.id);
+      if (convIdx === -1) return null;
+
       const otherPart = otherParts.find((p: any) => p.conversation_id === conv.id);
       if (!otherPart) return null;
 
       const otherUser = mapDbProfileToAppUser(otherPart.user_profiles as DbUserProfile);
-      const lastMsg = lastMessagesResults[idx].data as any;
-      const unreadCount = unreadResults[idx].count ?? 0;
+      const lastMsg = lastMessagesResults[convIdx]?.data as any;
+      const unreadCount = unreadResults[convIdx]?.count ?? 0;
 
       return {
         id: conv.id,
         other_user: otherUser,
-        last_message: lastMsg?.text ?? '',
+        last_message: getLastMessagePreview(lastMsg),
         last_time: lastMsg ? formatTimestamp(lastMsg.created_at) : '',
+        last_message_sender_id: lastMsg?.sender_id ?? null,
         unread: unreadCount,
         online: false,
         messages: [],
         updated_at: conv.updated_at,
-      } as AppConversation;
+      } as AppConversation & { last_message_sender_id: string | null };
     })
     .filter(Boolean) as AppConversation[];
 }
@@ -115,6 +129,8 @@ export async function fetchMessages(conversationId: string): Promise<AppMessage[
     read: m.read,
     created_at: m.created_at,
     timestamp: formatMessageTime(m.created_at),
+    media_url: (m as any).media_url ?? undefined,
+    media_type: (m as any).media_type ?? 'text',
   }));
 }
 
@@ -125,9 +141,14 @@ export async function sendMessage(
   mediaUrl?: string,
   mediaType?: string
 ): Promise<{ data: AppMessage | null; error: string | null }> {
-  const payload: any = { conversation_id: conversationId, sender_id: senderId, text };
+  const payload: any = {
+    conversation_id: conversationId,
+    sender_id: senderId,
+    text,
+  };
   if (mediaUrl) payload.media_url = mediaUrl;
-  if (mediaType) payload.media_type = mediaType;
+  if (mediaType && mediaType !== 'text') payload.media_type = mediaType;
+
   const { data, error } = await supabase
     .from('messages')
     .insert(payload)
@@ -136,7 +157,7 @@ export async function sendMessage(
 
   if (error) return { data: null, error: error.message };
 
-  // Update conversation updated_at
+  // Update conversation updated_at so list re-sorts
   await supabase
     .from('conversations')
     .update({ updated_at: new Date().toISOString() })
@@ -180,4 +201,17 @@ export async function getOrCreateConversation(otherUserId: string): Promise<stri
     return null;
   }
   return data as string;
+}
+
+export async function getUnreadCountForConversation(
+  conversationId: string,
+  currentUserId: string
+): Promise<number> {
+  const { count } = await supabase
+    .from('messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('conversation_id', conversationId)
+    .eq('read', false)
+    .neq('sender_id', currentUserId);
+  return count ?? 0;
 }
