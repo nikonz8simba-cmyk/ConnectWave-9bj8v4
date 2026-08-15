@@ -61,6 +61,10 @@ function RootNavigator() {
           name="hashtag/[tag]"
           options={{ headerShown: false, animation: 'slide_from_right' }}
         />
+        <Stack.Screen
+          name="notifications"
+          options={{ headerShown: false, animation: 'slide_from_right' }}
+        />
       </Stack>
     </>
   );

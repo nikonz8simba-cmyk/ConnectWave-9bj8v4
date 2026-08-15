@@ -1,17 +1,20 @@
 import React, { useState, useCallback, useRef } from 'react';
-import { View, Text, StyleSheet, Pressable, Animated } from 'react-native';
+import { View, Text, StyleSheet, Pressable, Animated, Share } from 'react-native';
 import { Image } from 'expo-image';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import { Avatar } from '@/components/ui/Avatar';
 import { CommentsBottomSheet } from '@/components/feature/CommentsBottomSheet';
+import { PostOptionsSheet } from '@/components/feature/PostOptionsSheet';
 import { MentionText } from '@/components/ui/MentionText';
+import { useAuth } from '@/hooks/useAuth';
 import { Colors, Spacing, Radii, FontSize, FontWeight, Shadows } from '@/constants/theme';
 import { AppPost } from '@/types/database';
 
 interface PostCardProps {
   post: AppPost;
   onLike: (id: string) => void;
+  onDeleted?: (postId: string) => void;
 }
 
 function formatCount(n: number): string {
@@ -56,10 +59,15 @@ function VideoPost({ uri }: { uri: string }) {
 // ─────────────────────────────────────────────
 // PostCard
 // ─────────────────────────────────────────────
-export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardProps) {
+export const PostCard = React.memo(function PostCard({ post, onLike, onDeleted }: PostCardProps) {
+  const { user } = useAuth();
   const [scale] = useState(new Animated.Value(1));
   const [commentsOpen, setCommentsOpen] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [localCommentsCount, setLocalCommentsCount] = useState(post.comments_count);
+  const [deleted, setDeleted] = useState(false);
+
+  const isOwnPost = user?.id === post.user.id;
 
   const handleLike = useCallback(() => {
     Animated.sequence([
@@ -72,6 +80,28 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
   const handleCommentCountChange = useCallback((delta: number) => {
     setLocalCommentsCount(prev => Math.max(0, prev + delta));
   }, []);
+
+  const handleShare = useCallback(async () => {
+    try {
+      const author = post.user.name || `@${post.user.username}`;
+      const preview = post.content.length > 120
+        ? post.content.slice(0, 120) + '…'
+        : post.content;
+      await Share.share({
+        message: `${author} en ConnectWave:\n\n"${preview}"`,
+        title: `Post de ${author}`,
+      });
+    } catch {
+      // User cancelled
+    }
+  }, [post]);
+
+  const handleDeleted = useCallback((postId: string) => {
+    setDeleted(true);
+    onDeleted?.(postId);
+  }, [onDeleted]);
+
+  if (deleted) return null;
 
   return (
     <View style={styles.card}>
@@ -87,7 +117,7 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
           </View>
           <Text style={styles.username}>@{post.user.username} · {post.timestamp}</Text>
         </View>
-        <Pressable hitSlop={8} style={styles.moreBtn}>
+        <Pressable hitSlop={8} style={styles.moreBtn} onPress={() => setOptionsOpen(true)}>
           <MaterialIcons name="more-horiz" size={20} color={Colors.textMuted} />
         </Pressable>
       </View>
@@ -142,7 +172,7 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
           <Text style={styles.actionCount}>{formatCount(localCommentsCount)}</Text>
         </Pressable>
 
-        <Pressable style={styles.actionBtn} hitSlop={8}>
+        <Pressable style={styles.actionBtn} hitSlop={8} onPress={handleShare}>
           <Ionicons name="arrow-redo-outline" size={21} color={Colors.textSecondary} />
           <Text style={styles.actionCount}>{formatCount(post.shares_count)}</Text>
         </Pressable>
@@ -159,6 +189,15 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
         commentsCount={localCommentsCount}
         onClose={() => setCommentsOpen(false)}
         onCountChange={handleCommentCountChange}
+      />
+
+      {/* Post options sheet */}
+      <PostOptionsSheet
+        visible={optionsOpen}
+        post={post}
+        isOwn={isOwnPost}
+        onClose={() => setOptionsOpen(false)}
+        onDeleted={handleDeleted}
       />
     </View>
   );

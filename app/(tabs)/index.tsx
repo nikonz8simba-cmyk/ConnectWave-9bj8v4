@@ -470,7 +470,7 @@ export default function FeedScreen() {
           <Pressable style={styles.iconBtn} hitSlop={8} onPress={() => router.push('/search' as any)}>
             <Ionicons name="search-outline" size={22} color={Colors.textSecondary} />
           </Pressable>
-          <Pressable style={styles.iconBtn} hitSlop={8}>
+          <Pressable style={styles.iconBtn} hitSlop={8} onPress={() => router.push('/notifications' as any)}>
             <View>
               <Ionicons name="notifications-outline" size={22} color={Colors.textSecondary} />
               {/* Notification dot */}
