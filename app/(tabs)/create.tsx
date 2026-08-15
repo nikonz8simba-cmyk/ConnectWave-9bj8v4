@@ -20,6 +20,7 @@ import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { Avatar } from '@/components/ui/Avatar';
+import { MentionInput } from '@/components/ui/MentionInput';
 import { useApp } from '@/hooks/useApp';
 import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/lib/supabase';
@@ -604,15 +605,18 @@ export default function CreateScreen() {
                 </View>
               ) : null}
 
-              <TextInput
-                style={styles.captionInput}
+              <MentionInput
+                value={content}
+                onChangeText={handleTextChange}
                 placeholder="¿Qué está pasando en tu onda? 🌊"
                 placeholderTextColor={Colors.textMuted}
                 multiline
-                value={content}
-                onChangeText={handleTextChange}
+                maxLength={MAX_CHARS}
                 autoFocus={false}
                 textAlignVertical="top"
+                dropdownDirection="down"
+                inputStyle={styles.captionInput}
+                minHeight={90}
               />
             </View>
           </View>

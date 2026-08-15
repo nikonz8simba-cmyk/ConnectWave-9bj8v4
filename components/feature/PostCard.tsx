@@ -5,6 +5,7 @@ import { VideoView, useVideoPlayer } from 'expo-video';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import { Avatar } from '@/components/ui/Avatar';
 import { CommentsBottomSheet } from '@/components/feature/CommentsBottomSheet';
+import { MentionText } from '@/components/ui/MentionText';
 import { Colors, Spacing, Radii, FontSize, FontWeight, Shadows } from '@/constants/theme';
 import { AppPost } from '@/types/database';
 
@@ -93,7 +94,10 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
 
       {/* Content */}
       {post.content ? (
-        <Text style={styles.content}>{post.content}</Text>
+        <MentionText
+          text={post.content}
+          style={styles.content}
+        />
       ) : null}
 
       {/* Media */}

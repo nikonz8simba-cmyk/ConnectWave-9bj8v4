@@ -17,6 +17,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Avatar } from '@/components/ui/Avatar';
+import { MentionInput } from '@/components/ui/MentionInput';
+import { MentionText } from '@/components/ui/MentionText';
 import { useAuth } from '@/hooks/useAuth';
 import { fetchComments, addComment, deleteComment } from '@/services/commentService';
 import { supabase } from '@/lib/supabase';
@@ -56,7 +58,7 @@ function CommentItem({ comment, currentUserId, onDelete }: CommentItemProps) {
             </Pressable>
           ) : null}
         </View>
-        <Text style={itemStyles.content}>{comment.content}</Text>
+        <MentionText text={comment.content} style={itemStyles.content} />
       </View>
     </View>
   );
@@ -356,16 +358,17 @@ export function CommentsBottomSheet({
           <View style={styles.inputBar}>
             <Avatar uri={profile?.avatar ?? 'https://i.pravatar.cc/150?img=7'} size={34} />
             <View style={styles.inputWrapper}>
-              <TextInput
-                style={styles.input}
-                placeholder="Añade un comentario..."
-                placeholderTextColor={Colors.textMuted}
+              <MentionInput
                 value={inputText}
                 onChangeText={setInputText}
+                placeholder="Añade un comentario..."
+                placeholderTextColor={Colors.textMuted}
                 multiline
                 maxLength={500}
                 returnKeyType="send"
                 onSubmitEditing={handleSend}
+                dropdownDirection="up"
+                inputStyle={[styles.input, { maxHeight: 100 }]}
               />
             </View>
             <Pressable
