@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useRef, useMemo } from 'react';
+import React, { useCallback, useState, useRef, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -326,7 +326,24 @@ export default function FeedScreen() {
   } = useApp();
 
   const [activeFilter, setActiveFilter] = useState<FilterCategory>('Todo');
+  const [visiblePostId, setVisiblePostId] = useState<string | null>(null);
   const scrollY = useRef(new Animated.Value(0)).current;
+
+  // Track which post is in the centre of the viewport for auto-play
+  const viewabilityConfig = useRef({
+    itemVisiblePercentThreshold: 60,
+    minimumViewTime: 200,
+  }).current;
+
+  const onViewableItemsChanged = useRef(
+    ({ viewableItems }: { viewableItems: Array<{ item: AppPost; isViewable: boolean }> }) => {
+      // Find the first viewable video post
+      const videoItem = viewableItems.find(
+        vi => vi.isViewable && vi.item.media_type === 'video' && vi.item.video_url
+      );
+      setVisiblePostId(videoItem ? videoItem.item.id : null);
+    }
+  ).current;
 
   // Derive filtered posts and counts per category
   const { filteredPosts, counts } = useMemo(() => {
@@ -366,9 +383,14 @@ export default function FeedScreen() {
 
   const renderPost = useCallback(
     ({ item }: { item: AppPost }) => (
-      <PostCard post={item} onLike={toggleLike} onDeleted={removePost} />
+      <PostCard
+        post={item}
+        onLike={toggleLike}
+        onDeleted={removePost}
+        visiblePostId={visiblePostId}
+      />
     ),
-    [toggleLike, removePost]
+    [toggleLike, removePost, visiblePostId]
   );
 
   const keyExtractor = useCallback((item: AppPost) => item.id, []);
@@ -497,6 +519,8 @@ export default function FeedScreen() {
         }
         onEndReached={handleEndReached}
         onEndReachedThreshold={0.5}
+        viewabilityConfig={viewabilityConfig}
+        onViewableItemsChanged={onViewableItemsChanged}
         onScroll={Animated.event(
           [{ nativeEvent: { contentOffset: { y: scrollY } } }],
           { useNativeDriver: false }

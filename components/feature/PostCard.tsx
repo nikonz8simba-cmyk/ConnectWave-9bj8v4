@@ -15,6 +15,8 @@ interface PostCardProps {
   post: AppPost;
   onLike: (id: string) => void;
   onDeleted?: (postId: string) => void;
+  /** When provided, auto-plays only the video whose postId matches */
+  visiblePostId?: string | null;
 }
 
 function formatCount(n: number): string {
@@ -26,15 +28,41 @@ function formatCount(n: number): string {
 // ─────────────────────────────────────────────
 // VideoPost — inline video player
 // ─────────────────────────────────────────────
-function VideoPost({ uri }: { uri: string }) {
-  const player = useVideoPlayer(uri, p => {
-    p.loop = true;
-  });
+function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
+  const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(true);
 
+  const player = useVideoPlayer(uri, p => {
+    p.loop = true;
+    p.muted = true;
+  });
+
+  // React to autoPlay changes (viewability-driven)
+  React.useEffect(() => {
+    if (!player) return;
+    if (autoPlay) {
+      try { player.play(); setPlaying(true); } catch { /* noop */ }
+    } else {
+      try { player.pause(); setPlaying(false); } catch { /* noop */ }
+    }
+  }, [autoPlay]);
+
+  const togglePlay = () => {
+    if (!player) return;
+    if (playing) {
+      player.pause();
+      setPlaying(false);
+    } else {
+      player.play();
+      setPlaying(true);
+    }
+  };
+
   const toggleMute = () => {
-    player.muted = !player.muted;
-    setMuted(v => !v);
+    if (!player) return;
+    const next = !muted;
+    player.muted = next;
+    setMuted(next);
   };
 
   return (
@@ -45,6 +73,20 @@ function VideoPost({ uri }: { uri: string }) {
         contentFit="cover"
         nativeControls={false}
       />
+
+      {/* Tap anywhere on video to play/pause */}
+      <Pressable style={StyleSheet.absoluteFill} onPress={togglePlay}>
+        {/* Show play overlay only when paused */}
+        {!playing ? (
+          <View style={styles.playOverlay}>
+            <View style={styles.playCircle}>
+              <Ionicons name="play" size={28} color="#fff" style={{ marginLeft: 3 }} />
+            </View>
+          </View>
+        ) : null}
+      </Pressable>
+
+      {/* Mute button — always visible */}
       <Pressable style={styles.muteBtn} onPress={toggleMute} hitSlop={8}>
         <Ionicons
           name={muted ? 'volume-mute' : 'volume-high'}
@@ -59,7 +101,8 @@ function VideoPost({ uri }: { uri: string }) {
 // ─────────────────────────────────────────────
 // PostCard
 // ─────────────────────────────────────────────
-export const PostCard = React.memo(function PostCard({ post, onLike, onDeleted }: PostCardProps) {
+export const PostCard = React.memo(function PostCard({ post, onLike, onDeleted, visiblePostId }: PostCardProps) {
+  const autoPlay = visiblePostId === post.id;
   const { user } = useAuth();
   const [scale] = useState(new Animated.Value(1));
   const [commentsOpen, setCommentsOpen] = useState(false);
@@ -138,7 +181,7 @@ export const PostCard = React.memo(function PostCard({ post, onLike, onDeleted }
 
       {/* Media */}
       {post.media_type === 'video' && post.video_url ? (
-        <VideoPost uri={post.video_url} />
+        <VideoPost uri={post.video_url} autoPlay={autoPlay} />
       ) : post.image_url ? (
         <View style={styles.imageWrapper}>
           <Image
@@ -259,11 +302,26 @@ const styles = StyleSheet.create({
     borderRadius: Radii.md,
     overflow: 'hidden',
     marginBottom: Spacing.sm,
-    height: 240,
+    height: 260,
     position: 'relative',
-    backgroundColor: Colors.background,
+    backgroundColor: '#000',
   },
   postVideo: { width: '100%', height: '100%' },
+  playOverlay: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playCircle: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.7)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   muteBtn: {
     position: 'absolute',
     bottom: 10,
