@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { View, Text, StyleSheet, Pressable, Animated, Share } from 'react-native';
 import { Image } from 'expo-image';
 import { VideoView, useVideoPlayer } from 'expo-video';
@@ -25,12 +25,23 @@ function formatCount(n: number): string {
   return String(n);
 }
 
+function formatVideoTime(seconds: number): string {
+  if (!isFinite(seconds) || seconds < 0) return '0:00';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
 // ─────────────────────────────────────────────
-// VideoPost — inline video player
+// VideoPost — inline video player with seek bar
 // ─────────────────────────────────────────────
 function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(true);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const seekBarWidthRef = useRef(0);
+  const progressAnim = useRef(new Animated.Value(0)).current;
 
   const player = useVideoPlayer(uri, p => {
     p.loop = true;
@@ -38,7 +49,7 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
   });
 
   // React to autoPlay changes (viewability-driven)
-  React.useEffect(() => {
+  useEffect(() => {
     if (!player) return;
     if (autoPlay) {
       try { player.play(); setPlaying(true); } catch { /* noop */ }
@@ -47,7 +58,42 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
     }
   }, [autoPlay]);
 
-  const togglePlay = () => {
+  // Poll currentTime + duration at 4fps while playing
+  useEffect(() => {
+    if (!playing) return;
+    const interval = setInterval(() => {
+      try {
+        const ct = player.currentTime ?? 0;
+        const dur = player.duration ?? 0;
+        setCurrentTime(ct);
+        if (dur > 0) setDuration(dur);
+      } catch { /* noop */ }
+    }, 250);
+    return () => clearInterval(interval);
+  }, [playing, player]);
+
+  // Grab duration once when paused / on mount
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      try {
+        const dur = player.duration ?? 0;
+        if (dur > 0) setDuration(dur);
+      } catch { /* noop */ }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [player]);
+
+  // Animate seek bar fill smoothly
+  useEffect(() => {
+    const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
+    Animated.timing(progressAnim, {
+      toValue: progress,
+      duration: 180,
+      useNativeDriver: false,
+    }).start();
+  }, [currentTime, duration]);
+
+  const togglePlay = useCallback(() => {
     if (!player) return;
     if (playing) {
       player.pause();
@@ -56,14 +102,30 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
       player.play();
       setPlaying(true);
     }
-  };
+  }, [player, playing]);
 
-  const toggleMute = () => {
+  const toggleMute = useCallback(() => {
     if (!player) return;
     const next = !muted;
     player.muted = next;
     setMuted(next);
-  };
+  }, [player, muted]);
+
+  const handleSeek = useCallback((event: any) => {
+    if (!player || duration <= 0 || seekBarWidthRef.current <= 0) return;
+    const { locationX } = event.nativeEvent;
+    const ratio = Math.max(0, Math.min(1, locationX / seekBarWidthRef.current));
+    const seekTo = ratio * duration;
+    try {
+      player.currentTime = seekTo;
+      setCurrentTime(seekTo);
+    } catch { /* noop */ }
+  }, [player, duration]);
+
+  const fillWidth = progressAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0%', '100%'],
+  });
 
   return (
     <View style={styles.videoWrapper}>
@@ -74,9 +136,11 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
         nativeControls={false}
       />
 
-      {/* Tap anywhere on video to play/pause */}
-      <Pressable style={StyleSheet.absoluteFill} onPress={togglePlay}>
-        {/* Show play overlay only when paused */}
+      {/* Tap anywhere on video (except seek bar area) to play/pause */}
+      <Pressable
+        style={[StyleSheet.absoluteFill, { bottom: 44 }]}
+        onPress={togglePlay}
+      >
         {!playing ? (
           <View style={styles.playOverlay}>
             <View style={styles.playCircle}>
@@ -86,7 +150,41 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
         ) : null}
       </Pressable>
 
-      {/* Mute button — always visible */}
+      {/* ── Bottom gradient + seek bar ── */}
+      <View style={styles.seekBarArea} pointerEvents="box-none">
+        {/* Time labels row */}
+        <View style={styles.videoTimeRow}>
+          <Text style={styles.videoTimeText}>{formatVideoTime(currentTime)}</Text>
+          <Text style={styles.videoTimeText}>{formatVideoTime(duration)}</Text>
+        </View>
+
+        {/* Seek track — tappable */}
+        <Pressable
+          style={styles.seekBarTrack}
+          onPress={handleSeek}
+          onLayout={e => { seekBarWidthRef.current = e.nativeEvent.layout.width; }}
+          hitSlop={{ top: 10, bottom: 10 }}
+        >
+          {/* Background track */}
+          <View style={styles.seekBarBg} />
+          {/* Filled portion */}
+          <Animated.View style={[styles.seekBarFill, { width: fillWidth as any }]} />
+          {/* Thumb dot — positioned via interpolated left */}
+          <Animated.View
+            style={[
+              styles.seekBarThumb,
+              {
+                left: progressAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0, seekBarWidthRef.current > 0 ? seekBarWidthRef.current - 10 : 10],
+                }) as any,
+              },
+            ]}
+          />
+        </Pressable>
+      </View>
+
+      {/* Mute button — moved to top-right to avoid overlap with seek bar */}
       <Pressable style={styles.muteBtn} onPress={toggleMute} hitSlop={8}>
         <Ionicons
           name={muted ? 'volume-mute' : 'volume-high'}
@@ -298,11 +396,13 @@ const styles = StyleSheet.create({
   },
   imageWrapper: { borderRadius: Radii.md, overflow: 'hidden', marginBottom: Spacing.sm },
   postImage: { width: '100%', height: 240, borderRadius: Radii.md },
+
+  // ── Video player ──
   videoWrapper: {
     borderRadius: Radii.md,
     overflow: 'hidden',
     marginBottom: Spacing.sm,
-    height: 260,
+    height: 280,
     position: 'relative',
     backgroundColor: '#000',
   },
@@ -322,9 +422,68 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+
+  // ── Seek bar area ──
+  seekBarArea: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    paddingHorizontal: 10,
+    paddingBottom: 8,
+    paddingTop: 24,
+    // Subtle dark gradient so controls are readable over any video frame
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  videoTimeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 5,
+    paddingHorizontal: 2,
+  },
+  videoTimeText: {
+    fontSize: 10,
+    color: 'rgba(255,255,255,0.9)',
+    fontWeight: '600',
+  },
+  seekBarTrack: {
+    height: 18,
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  seekBarBg: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+  },
+  seekBarFill: {
+    position: 'absolute',
+    left: 0,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: Colors.primary,
+  },
+  seekBarThumb: {
+    position: 'absolute',
+    top: 4,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.5,
+    shadowRadius: 2,
+    elevation: 4,
+  },
+
+  // Mute button — top-right corner
   muteBtn: {
     position: 'absolute',
-    bottom: 10,
+    top: 10,
     right: 10,
     backgroundColor: 'rgba(0,0,0,0.55)',
     borderRadius: 14,
@@ -333,6 +492,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+
+  // ── Actions row ──
   actions: {
     flexDirection: 'row',
     alignItems: 'center',
