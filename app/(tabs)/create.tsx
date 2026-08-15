@@ -1489,7 +1489,9 @@ const styles = StyleSheet.create({
     borderRadius: Radii.lg,
     borderWidth: 1,
     borderColor: Colors.surfaceBorder,
-    overflow: 'hidden',
+    // NOTE: overflow:'hidden' intentionally omitted — it causes Android
+    // VideoView (SurfaceView) to render black. Rounded corners on image
+    // preview come from mediaPreviewImage directly.
   },
   mediaPreviewWrapper: { position: 'relative', backgroundColor: Colors.surfaceElevated },
   mediaPreviewImage: { width: '100%', height: MEDIA_HEIGHT },

@@ -140,12 +140,15 @@ function VideoPost({ uri, autoPlay }: { uri: string; autoPlay: boolean }) {
     outputRange: ['0%', '100%'],
   });
 
-  // ── Android: delegate everything to native controls ────────────────────────
-  // nativeControls=true forces Android to properly initialise the SurfaceView
-  // render path AND provides a built-in volume slider + scrubber.
+  // ── Android: SurfaceView renders in a separate hardware layer BELOW the
+  // React Native view hierarchy. Two things break it:
+  //   1. overflow: 'hidden' on any ancestor clips the SurfaceView → black box
+  //   2. borderRadius on the wrapper is ignored by the SurfaceView layer
+  // Fix: use a plain View WITHOUT overflow:hidden / borderRadius on Android,
+  // and use nativeControls=true which forces the SurfaceView to initialise.
   if (IS_ANDROID) {
     return (
-      <View style={styles.videoWrapper}>
+      <View style={styles.videoWrapperAndroid}>
         <VideoView
           player={player}
           style={styles.postVideo}
@@ -427,6 +430,14 @@ const styles = StyleSheet.create({
   videoWrapper: {
     borderRadius: Radii.md,
     overflow: 'hidden',
+    marginBottom: Spacing.sm,
+    height: 280,
+    position: 'relative',
+    backgroundColor: '#000',
+  },
+  // Android: NO overflow:hidden / borderRadius — SurfaceView is a hardware
+  // layer that renders below RN views and ignores those CSS-style properties.
+  videoWrapperAndroid: {
     marginBottom: Spacing.sm,
     height: 280,
     position: 'relative',
