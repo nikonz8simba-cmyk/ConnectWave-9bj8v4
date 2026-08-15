@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,8 @@ import {
   Alert,
   ActivityIndicator,
   Platform,
+  Dimensions,
+  RefreshControl,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
@@ -20,22 +22,19 @@ import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { Avatar } from '@/components/ui/Avatar';
 import { useAuth } from '@/hooks/useAuth';
-import { useApp } from '@/hooks/useApp';
 import { signOut, updateUserProfile } from '@/services/authService';
+import { fetchUserPosts } from '@/services/postService';
 import { supabase } from '@/lib/supabase';
 import { Colors, Spacing, FontSize, FontWeight, Radii } from '@/constants/theme';
 import { AppPost } from '@/types/database';
 
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const GRID_GAP = 3;
+const GRID_ITEM_SIZE = (SCREEN_WIDTH - GRID_GAP * 2) / 3;
+
 type TabType = 'posts' | 'liked' | 'media';
 
-function StatItem({ value, label }: { value: string | number; label: string }) {
-  return (
-    <View style={styles.statItem}>
-      <Text style={styles.statValue}>{value}</Text>
-      <Text style={styles.statLabel}>{label}</Text>
-    </View>
-  );
-}
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatStat(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -45,8 +44,7 @@ function formatStat(n: number): string {
 
 async function uploadAvatar(uri: string, userId: string): Promise<string | null> {
   try {
-    const ext = 'jpg';
-    const fileName = `${userId}/avatar.${ext}`;
+    const fileName = `${userId}/avatar_${Date.now()}.jpg`;
     const response = await fetch(uri);
     const blob = await response.blob();
 
@@ -69,17 +67,29 @@ async function uploadAvatar(uri: string, userId: string): Promise<string | null>
     }
 
     const { data } = supabase.storage.from('avatars').getPublicUrl(fileName);
-    return data.publicUrl + `?t=${Date.now()}`;
+    return `${data.publicUrl}?t=${Date.now()}`;
   } catch {
     return null;
   }
 }
 
+// ─── Stat Item ────────────────────────────────────────────────────────────────
+
+function StatItem({ value, label }: { value: string | number; label: string }) {
+  return (
+    <View style={styles.statItem}>
+      <Text style={styles.statValue}>{value}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
 // ─── Edit Profile Modal ───────────────────────────────────────────────────────
+
 interface EditProfileModalProps {
   visible: boolean;
   onClose: () => void;
-  onSave: (updates: { name: string; bio: string; username: string; avatar?: string }) => Promise<void>;
+  onSave: (updates: { name: string; bio: string; username: string; avatarUri: string }) => Promise<void>;
   initialName: string;
   initialBio: string;
   initialUsername: string;
@@ -108,16 +118,19 @@ function EditProfileModal({
       setUsername(initialUsername);
       setAvatarUri(initialAvatar);
     }
-  }, [visible]);
+  }, [visible, initialName, initialBio, initialUsername, initialAvatar]);
 
   const pickAvatar = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') { Alert.alert('Permiso requerido', 'Necesitamos acceso a tu galería.'); return; }
+    if (status !== 'granted') {
+      Alert.alert('Permiso requerido', 'Necesitamos acceso a tu galería.');
+      return;
+    }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
       allowsEditing: true,
       aspect: [1, 1],
-      quality: 0.8,
+      quality: 0.85,
     });
     if (!result.canceled && result.assets[0]) {
       setAvatarUri(result.assets[0].uri);
@@ -128,7 +141,7 @@ function EditProfileModal({
     if (!name.trim()) { Alert.alert('Error', 'El nombre no puede estar vacío.'); return; }
     if (!username.trim()) { Alert.alert('Error', 'El usuario no puede estar vacío.'); return; }
     setSaving(true);
-    await onSave({ name: name.trim(), bio: bio.trim(), username: username.trim(), avatar: avatarUri });
+    await onSave({ name: name.trim(), bio: bio.trim(), username: username.trim(), avatarUri });
     setSaving(false);
     onClose();
   };
@@ -136,21 +149,25 @@ function EditProfileModal({
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet">
       <View style={editStyles.container}>
+        {/* Header */}
         <View style={editStyles.header}>
-          <Pressable onPress={onClose} hitSlop={8}>
-            <Text style={editStyles.cancelText}>Cancelar</Text>
+          <Pressable onPress={onClose} hitSlop={8} disabled={saving}>
+            <Text style={[editStyles.cancelText, saving ? { opacity: 0.4 } : null]}>Cancelar</Text>
           </Pressable>
           <Text style={editStyles.title}>Editar perfil</Text>
           <Pressable onPress={handleSave} disabled={saving} hitSlop={8}>
-            {saving ? (
-              <ActivityIndicator color={Colors.primary} size="small" />
-            ) : (
-              <Text style={editStyles.saveText}>Guardar</Text>
-            )}
+            {saving
+              ? <ActivityIndicator color={Colors.primary} size="small" />
+              : <Text style={editStyles.saveText}>Guardar</Text>
+            }
           </Pressable>
         </View>
 
-        <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          style={{ flex: 1 }}
+          keyboardShouldPersistTaps="handled"
+        >
           {/* Avatar picker */}
           <View style={editStyles.avatarSection}>
             <Pressable onPress={pickAvatar} style={editStyles.avatarBtn}>
@@ -161,7 +178,7 @@ function EditProfileModal({
                 transition={200}
               />
               <View style={editStyles.avatarOverlay}>
-                <Ionicons name="camera" size={22} color="#fff" />
+                <Ionicons name="camera" size={20} color="#fff" />
                 <Text style={editStyles.avatarOverlayText}>Cambiar foto</Text>
               </View>
             </Pressable>
@@ -170,7 +187,7 @@ function EditProfileModal({
           {/* Fields */}
           <View style={editStyles.fieldsContainer}>
             <View style={editStyles.field}>
-              <Text style={editStyles.fieldLabel}>Nombre</Text>
+              <Text style={editStyles.fieldLabel}>Nombre completo</Text>
               <TextInput
                 style={editStyles.fieldInput}
                 value={name}
@@ -180,8 +197,9 @@ function EditProfileModal({
                 maxLength={50}
               />
             </View>
+
             <View style={editStyles.field}>
-              <Text style={editStyles.fieldLabel}>Usuario</Text>
+              <Text style={editStyles.fieldLabel}>Nombre de usuario</Text>
               <View style={editStyles.usernameRow}>
                 <Text style={editStyles.atSign}>@</Text>
                 <TextInput
@@ -191,10 +209,12 @@ function EditProfileModal({
                   placeholder="usuario"
                   placeholderTextColor={Colors.textMuted}
                   autoCapitalize="none"
+                  autoCorrect={false}
                   maxLength={30}
                 />
               </View>
             </View>
+
             <View style={editStyles.field}>
               <Text style={editStyles.fieldLabel}>Biografía</Text>
               <TextInput
@@ -205,6 +225,7 @@ function EditProfileModal({
                 placeholderTextColor={Colors.textMuted}
                 multiline
                 maxLength={160}
+                textAlignVertical="top"
               />
               <Text style={editStyles.charCount}>{bio.length}/160</Text>
             </View>
@@ -215,25 +236,86 @@ function EditProfileModal({
   );
 }
 
+// ─── Grid Item ────────────────────────────────────────────────────────────────
+
+const GridItem = React.memo(function GridItem({ item }: { item: AppPost }) {
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.gridItem, pressed ? { opacity: 0.8 } : null]}
+    >
+      {item.media_type === 'video' && item.video_url ? (
+        <View style={styles.gridItemInner}>
+          <Image
+            source={{ uri: `https://picsum.photos/seed/${item.id}/200/200` }}
+            style={styles.gridImage}
+            contentFit="cover"
+            transition={200}
+          />
+          <View style={styles.gridBadge}>
+            <Ionicons name="videocam" size={11} color="#fff" />
+          </View>
+        </View>
+      ) : item.image_url ? (
+        <Image
+          source={{ uri: item.image_url }}
+          style={styles.gridImage}
+          contentFit="cover"
+          transition={200}
+        />
+      ) : (
+        <View style={[styles.gridImage, styles.gridTextItem]}>
+          <Text style={styles.gridTextContent} numberOfLines={5}>{item.content}</Text>
+        </View>
+      )}
+      {item.liked ? (
+        <View style={styles.gridLikedDot} />
+      ) : null}
+    </Pressable>
+  );
+});
+
 // ─── Profile Screen ───────────────────────────────────────────────────────────
+
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { profile, loading, refreshProfile } = useAuth();
-  const { posts } = useApp();
+  const { profile, loading: authLoading, refreshProfile, user } = useAuth();
+
   const [activeTab, setActiveTab] = useState<TabType>('posts');
+  const [userPosts, setUserPosts] = useState<AppPost[]>([]);
+  const [postsLoading, setPostsLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [editModalVisible, setEditModalVisible] = useState(false);
 
-  // Filter posts by current user
-  const userPosts = posts.filter(p => p.user.id === profile?.id);
-  const likedPosts = posts.filter(p => p.liked);
-  const mediaPosts = posts.filter(
-    p => p.user.id === profile?.id && (p.media_type === 'image' || p.media_type === 'video')
+  const loadUserPosts = useCallback(async () => {
+    if (!profile?.id || !user?.id) return;
+    setPostsLoading(true);
+    const data = await fetchUserPosts(profile.id, user.id);
+    setUserPosts(data);
+    setPostsLoading(false);
+  }, [profile?.id, user?.id]);
+
+  useEffect(() => {
+    loadUserPosts();
+  }, [loadUserPosts]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await Promise.all([refreshProfile?.(), loadUserPosts()]);
+    setRefreshing(false);
+  }, [refreshProfile, loadUserPosts]);
+
+  // Tabs: posts / liked / media
+  const likedPosts = userPosts.filter(p => p.liked);
+  const mediaPosts = userPosts.filter(
+    p => p.media_type === 'image' || p.media_type === 'video'
   );
 
   const activeData: AppPost[] =
-    activeTab === 'posts' ? userPosts : activeTab === 'liked' ? likedPosts : mediaPosts;
+    activeTab === 'posts' ? userPosts
+    : activeTab === 'liked' ? likedPosts
+    : mediaPosts;
 
   const handleSignOut = () => {
     Alert.alert('Cerrar sesión', '¿Seguro que quieres salir?', [
@@ -255,14 +337,13 @@ export default function ProfileScreen() {
     name: string;
     bio: string;
     username: string;
-    avatar?: string;
+    avatarUri: string;
   }) => {
     if (!profile?.id) return;
     let avatarUrl = profile.avatar;
 
-    // Upload new avatar if changed
-    if (updates.avatar && updates.avatar !== profile.avatar) {
-      const uploaded = await uploadAvatar(updates.avatar, profile.id);
+    if (updates.avatarUri && updates.avatarUri !== profile.avatar) {
+      const uploaded = await uploadAvatar(updates.avatarUri, profile.id);
       if (uploaded) avatarUrl = uploaded;
     }
 
@@ -272,6 +353,7 @@ export default function ProfileScreen() {
       username: updates.username,
       avatar: avatarUrl,
     });
+
     if (error) {
       Alert.alert('Error', error);
       return;
@@ -279,102 +361,102 @@ export default function ProfileScreen() {
     await refreshProfile?.();
   };
 
-  // Still initialising — show spinner only briefly
-  if (loading) {
+  // ── Loading / error states ────────────────────────────────────────────────
+
+  if (authLoading) {
     return (
-      <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
+      <View style={[styles.container, { paddingTop: insets.top }, styles.centered]}>
         <ActivityIndicator color={Colors.primary} size="large" />
       </View>
     );
   }
 
-  // Auth done but profile failed to load — offer a retry
   if (!profile) {
     return (
-      <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center', gap: Spacing.md }]}>
+      <View style={[styles.container, { paddingTop: insets.top }, styles.centered, { gap: Spacing.md }]}>
         <Ionicons name="person-circle-outline" size={64} color={Colors.textMuted} />
-        <Text style={{ color: Colors.textSecondary, fontSize: FontSize.base }}>No se pudo cargar el perfil</Text>
-        <Pressable
-          style={{ backgroundColor: Colors.primary, paddingHorizontal: Spacing.lg, paddingVertical: Spacing.sm, borderRadius: Radii.full }}
-          onPress={() => refreshProfile?.()}
-        >
-          <Text style={{ color: '#fff', fontWeight: FontWeight.semibold }}>Reintentar</Text>
+        <Text style={styles.errorText}>No se pudo cargar el perfil</Text>
+        <Pressable style={styles.retryBtn} onPress={() => refreshProfile?.()}>
+          <Text style={styles.retryBtnText}>Reintentar</Text>
         </Pressable>
       </View>
     );
   }
 
-  const tabs: { id: TabType; label: string; icon: string }[] = [
-    { id: 'posts', label: 'Posts', icon: 'grid-outline' },
-    { id: 'liked', label: 'Me gusta', icon: 'heart-outline' },
-    { id: 'media', label: 'Media', icon: 'images-outline' },
+  const tabs: { id: TabType; label: string; icon: string; count: number }[] = [
+    { id: 'posts', label: 'Posts', icon: 'grid-outline', count: userPosts.length },
+    { id: 'liked', label: 'Me gusta', icon: 'heart-outline', count: likedPosts.length },
+    { id: 'media', label: 'Media', icon: 'images-outline', count: mediaPosts.length },
   ];
-
-  const renderGridItem = ({ item }: { item: AppPost }) => (
-    <Pressable style={styles.gridItem}>
-      {item.media_type === 'video' && item.video_url ? (
-        <View style={styles.gridImage}>
-          <Image
-            source={{ uri: `https://i.pravatar.cc/200?img=${Math.floor(Math.random() * 30)}` }}
-            style={styles.gridImage}
-            contentFit="cover"
-            transition={200}
-          />
-          <View style={styles.gridVideoLabel}>
-            <Ionicons name="videocam" size={12} color="#fff" />
-          </View>
-        </View>
-      ) : item.image_url ? (
-        <Image source={{ uri: item.image_url }} style={styles.gridImage} contentFit="cover" transition={200} />
-      ) : (
-        <View style={[styles.gridImage, styles.gridTextPost]}>
-          <Text style={styles.gridTextContent} numberOfLines={4}>{item.content}</Text>
-        </View>
-      )}
-    </Pressable>
-  );
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
-      <ScrollView showsVerticalScrollIndicator={false}>
-        {/* Header */}
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>Mi Perfil</Text>
-          <View style={styles.headerActions}>
-            <Pressable hitSlop={8} style={styles.headerBtn} onPress={() => setEditModalVisible(true)}>
-              <Ionicons name="settings-outline" size={22} color={Colors.textSecondary} />
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={Colors.primary}
+            colors={[Colors.primary]}
+          />
+        }
+      >
+        {/* ── Top bar ─────────────────────────────────────────────────────── */}
+        <View style={styles.topBar}>
+          <Text style={styles.topBarTitle}>
+            {profile.verified ? (
+              <MaterialIcons name="verified" size={16} color={Colors.primary} />
+            ) : null}
+            {' '}{profile.username}
+          </Text>
+          <View style={styles.topBarActions}>
+            <Pressable
+              style={styles.iconBtn}
+              hitSlop={8}
+              onPress={() => setEditModalVisible(true)}
+            >
+              <Ionicons name="create-outline" size={22} color={Colors.textSecondary} />
             </Pressable>
-            <Pressable onPress={handleSignOut} hitSlop={8} style={styles.headerBtn} disabled={signingOut}>
-              {signingOut ? (
-                <ActivityIndicator color={Colors.error} size="small" />
-              ) : (
-                <Ionicons name="log-out-outline" size={22} color={Colors.error} />
-              )}
+            <Pressable
+              style={styles.iconBtn}
+              hitSlop={8}
+              onPress={handleSignOut}
+              disabled={signingOut}
+            >
+              {signingOut
+                ? <ActivityIndicator color={Colors.error} size="small" />
+                : <Ionicons name="log-out-outline" size={22} color={Colors.error} />
+              }
             </Pressable>
           </View>
         </View>
 
-        {/* Cover Banner */}
+        {/* ── Cover banner ─────────────────────────────────────────────────── */}
         <LinearGradient
-          colors={[Colors.primary, Colors.secondary, Colors.background]}
+          colors={[Colors.primary + 'CC', Colors.secondary + '88', 'transparent']}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
           style={styles.coverBanner}
         >
-          <View style={styles.waveLine} />
+          {/* wave cutout */}
+          <View style={styles.coverWave} />
         </LinearGradient>
 
-        {/* Avatar */}
-        <View style={styles.avatarSection}>
+        {/* ── Avatar row ───────────────────────────────────────────────────── */}
+        <View style={styles.avatarRow}>
           <Pressable style={styles.avatarWrapper} onPress={() => setEditModalVisible(true)}>
-            <Avatar uri={profile.avatar} size={82} />
-            <View style={styles.editAvatarBtn}>
-              <MaterialIcons name="edit" size={14} color="#fff" />
+            <Avatar uri={profile.avatar} size={86} />
+            <View style={styles.avatarEditDot}>
+              <MaterialIcons name="edit" size={12} color="#fff" />
             </View>
           </Pressable>
-          <View style={styles.headerRight}>
-            <Pressable style={styles.editProfileBtn} onPress={() => setEditModalVisible(true)}>
-              <Text style={styles.editProfileBtnText}>Editar perfil</Text>
+          <View style={styles.avatarRowRight}>
+            <Pressable
+              style={styles.editBtn}
+              onPress={() => setEditModalVisible(true)}
+            >
+              <Text style={styles.editBtnText}>Editar perfil</Text>
             </Pressable>
             <Pressable style={styles.shareBtn}>
               <Ionicons name="share-social-outline" size={18} color={Colors.primary} />
@@ -382,21 +464,35 @@ export default function ProfileScreen() {
           </View>
         </View>
 
-        {/* User Info */}
+        {/* ── User info ────────────────────────────────────────────────────── */}
         <View style={styles.userInfo}>
           <View style={styles.nameRow}>
-            <Text style={styles.name}>{profile.name || profile.username}</Text>
+            <Text style={styles.displayName}>{profile.name || profile.username}</Text>
             {profile.verified ? (
-              <MaterialIcons name="verified" size={16} color={Colors.primary} style={{ marginLeft: 4 }} />
+              <MaterialIcons
+                name="verified"
+                size={17}
+                color={Colors.primary}
+                style={{ marginLeft: 5 }}
+              />
             ) : null}
           </View>
-          <Text style={styles.username}>@{profile.username}</Text>
-          {profile.bio ? <Text style={styles.bio}>{profile.bio}</Text> : null}
-          <Text style={styles.metaText}>{profile.email}</Text>
+          <Text style={styles.handle}>@{profile.username}</Text>
+          {profile.bio ? (
+            <Text style={styles.bio}>{profile.bio}</Text>
+          ) : (
+            <Pressable onPress={() => setEditModalVisible(true)}>
+              <Text style={styles.bioPlaceholder}>+ Añade una bio</Text>
+            </Pressable>
+          )}
+          <View style={styles.metaRow}>
+            <Ionicons name="mail-outline" size={13} color={Colors.textMuted} />
+            <Text style={styles.metaText}>{profile.email}</Text>
+          </View>
         </View>
 
-        {/* Stats */}
-        <View style={styles.statsRow}>
+        {/* ── Stats card ───────────────────────────────────────────────────── */}
+        <View style={styles.statsCard}>
           <StatItem value={formatStat(userPosts.length || profile.posts_count)} label="Posts" />
           <View style={styles.statDivider} />
           <StatItem value={formatStat(profile.followers_count)} label="Seguidores" />
@@ -404,105 +500,168 @@ export default function ProfileScreen() {
           <StatItem value={formatStat(profile.following_count)} label="Siguiendo" />
         </View>
 
-        {/* Tabs */}
-        <View style={styles.tabsRow}>
-          {tabs.map(tab => (
-            <Pressable
-              key={tab.id}
-              style={[styles.tabBtn, activeTab === tab.id ? styles.tabBtnActive : null]}
-              onPress={() => setActiveTab(tab.id)}
-            >
-              <Ionicons
-                name={tab.icon as any}
-                size={18}
-                color={activeTab === tab.id ? Colors.primary : Colors.textMuted}
-              />
-              <Text style={[styles.tabLabel, activeTab === tab.id ? styles.tabLabelActive : null]}>
-                {tab.label}
-              </Text>
-            </Pressable>
-          ))}
+        {/* ── Content tabs ─────────────────────────────────────────────────── */}
+        <View style={styles.tabsBar}>
+          {tabs.map(tab => {
+            const isActive = activeTab === tab.id;
+            return (
+              <Pressable
+                key={tab.id}
+                style={[styles.tabBtn, isActive ? styles.tabBtnActive : null]}
+                onPress={() => setActiveTab(tab.id)}
+              >
+                <Ionicons
+                  name={tab.icon as any}
+                  size={17}
+                  color={isActive ? Colors.primary : Colors.textMuted}
+                />
+                <Text style={[styles.tabLabel, isActive ? styles.tabLabelActive : null]}>
+                  {tab.label}
+                </Text>
+                {tab.count > 0 ? (
+                  <View style={[styles.tabCount, isActive ? styles.tabCountActive : null]}>
+                    <Text style={[styles.tabCountText, isActive ? styles.tabCountTextActive : null]}>
+                      {tab.count}
+                    </Text>
+                  </View>
+                ) : null}
+              </Pressable>
+            );
+          })}
         </View>
 
-        {/* Content Grid */}
-        <View style={styles.gridContainer}>
-          {activeData.length === 0 ? (
+        {/* ── Posts grid ───────────────────────────────────────────────────── */}
+        <View style={styles.gridWrapper}>
+          {postsLoading ? (
+            <View style={styles.gridLoading}>
+              <ActivityIndicator color={Colors.primary} />
+              <Text style={styles.gridLoadingText}>Cargando posts...</Text>
+            </View>
+          ) : activeData.length === 0 ? (
             <View style={styles.emptyState}>
-              <Ionicons
-                name={activeTab === 'posts' ? 'create-outline' : activeTab === 'liked' ? 'heart-outline' : 'images-outline'}
-                size={48}
-                color={Colors.textMuted}
-              />
+              <View style={styles.emptyIconWrapper}>
+                <Ionicons
+                  name={
+                    activeTab === 'posts'
+                      ? 'create-outline'
+                      : activeTab === 'liked'
+                      ? 'heart-outline'
+                      : 'images-outline'
+                  }
+                  size={44}
+                  color={Colors.textMuted}
+                />
+              </View>
               <Text style={styles.emptyTitle}>
                 {activeTab === 'posts'
-                  ? 'Sin posts todavía'
+                  ? 'Sin publicaciones todavía'
                   : activeTab === 'liked'
                   ? 'Sin likes todavía'
-                  : 'Sin media todavía'}
+                  : 'Sin fotos ni videos'}
               </Text>
               <Text style={styles.emptySubtitle}>
-                {activeTab === 'posts' ? 'Crea tu primer post 🌊' : 'Explora el feed para interactuar'}
+                {activeTab === 'posts'
+                  ? 'Crea tu primer post y aparecerá aquí 🌊'
+                  : activeTab === 'liked'
+                  ? 'Da like a publicaciones del feed para verlas aquí'
+                  : 'Sube fotos o videos en tus posts para verlos aquí'}
               </Text>
+              {activeTab === 'posts' ? (
+                <Pressable
+                  style={styles.createFirstPostBtn}
+                  onPress={() => router.push('/(tabs)/create' as any)}
+                >
+                  <LinearGradient
+                    colors={[Colors.primary, Colors.secondary]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 0 }}
+                    style={styles.createFirstPostGradient}
+                  >
+                    <Ionicons name="add" size={18} color="#fff" />
+                    <Text style={styles.createFirstPostText}>Crear post</Text>
+                  </LinearGradient>
+                </Pressable>
+              ) : null}
             </View>
           ) : (
             <FlatList
               data={activeData}
               keyExtractor={item => item.id}
-              renderItem={renderGridItem}
+              renderItem={({ item }) => <GridItem item={item} />}
               numColumns={3}
               scrollEnabled={false}
               columnWrapperStyle={styles.gridRow}
-              ItemSeparatorComponent={() => <View style={{ height: 3 }} />}
+              ItemSeparatorComponent={() => <View style={{ height: GRID_GAP }} />}
+              contentContainerStyle={{ paddingBottom: Spacing.xl }}
             />
           )}
         </View>
       </ScrollView>
 
-      {/* Edit Profile Modal */}
-      {profile ? (
-        <EditProfileModal
-          visible={editModalVisible}
-          onClose={() => setEditModalVisible(false)}
-          onSave={handleSaveProfile}
-          initialName={profile.name}
-          initialBio={profile.bio}
-          initialUsername={profile.username}
-          initialAvatar={profile.avatar}
-        />
-      ) : null}
+      {/* ── Edit Profile Modal ─────────────────────────────────────────────── */}
+      <EditProfileModal
+        visible={editModalVisible}
+        onClose={() => setEditModalVisible(false)}
+        onSave={handleSaveProfile}
+        initialName={profile.name}
+        initialBio={profile.bio}
+        initialUsername={profile.username}
+        initialAvatar={profile.avatar}
+      />
     </View>
   );
 }
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
-  header: {
+  centered: { alignItems: 'center', justifyContent: 'center' },
+  errorText: { color: Colors.textSecondary, fontSize: FontSize.base },
+  retryBtn: {
+    backgroundColor: Colors.primary,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.sm,
+    borderRadius: Radii.full,
+  },
+  retryBtnText: { color: '#fff', fontWeight: FontWeight.semibold, fontSize: FontSize.base },
+
+  // Top bar
+  topBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
+    paddingVertical: 10,
   },
-  headerTitle: { fontSize: FontSize.md, fontWeight: FontWeight.semibold, color: Colors.textPrimary },
-  headerActions: { flexDirection: 'row', gap: 4 },
-  headerBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
+  topBarTitle: {
+    fontSize: FontSize.md,
+    fontWeight: FontWeight.bold,
+    color: Colors.textPrimary,
+  },
+  topBarActions: { flexDirection: 'row', gap: 4 },
+  iconBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
+
+  // Cover
   coverBanner: {
-    height: 120,
-    marginBottom: -40,
-    alignItems: 'center',
-    justifyContent: 'flex-end',
+    height: 110,
+    marginBottom: -44,
     overflow: 'hidden',
+    position: 'relative',
   },
-  waveLine: {
-    width: '150%',
-    height: 40,
-    backgroundColor: Colors.background,
-    borderTopLeftRadius: 50,
-    borderTopRightRadius: 50,
+  coverWave: {
     position: 'absolute',
     bottom: 0,
+    left: 0,
+    right: 0,
+    height: 44,
+    backgroundColor: Colors.background,
+    borderTopLeftRadius: 48,
+    borderTopRightRadius: 48,
   },
-  avatarSection: {
+
+  // Avatar row
+  avatarRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     justifyContent: 'space-between',
@@ -510,90 +669,119 @@ const styles = StyleSheet.create({
     marginBottom: Spacing.sm,
   },
   avatarWrapper: { position: 'relative' },
-  editAvatarBtn: {
+  avatarEditDot: {
     position: 'absolute',
-    bottom: 0,
-    right: 4,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    bottom: 2,
+    right: 2,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
     backgroundColor: Colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2,
     borderColor: Colors.background,
   },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingBottom: 8 },
-  editProfileBtn: {
+  avatarRowRight: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingBottom: 6 },
+  editBtn: {
     paddingHorizontal: Spacing.md,
     paddingVertical: 8,
     borderRadius: Radii.full,
     backgroundColor: Colors.primary,
+    minWidth: 110,
+    alignItems: 'center',
   },
-  editProfileBtnText: { color: '#fff', fontWeight: FontWeight.semibold, fontSize: FontSize.sm },
+  editBtnText: { color: '#fff', fontWeight: FontWeight.semibold, fontSize: FontSize.sm },
   shareBtn: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: Colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  userInfo: { paddingHorizontal: Spacing.md, gap: 4, marginBottom: Spacing.md },
+
+  // User info
+  userInfo: { paddingHorizontal: Spacing.md, gap: 3, marginBottom: Spacing.md },
   nameRow: { flexDirection: 'row', alignItems: 'center' },
-  name: { fontSize: FontSize.xl, fontWeight: FontWeight.bold, color: Colors.textPrimary },
-  username: { fontSize: FontSize.base, color: Colors.textMuted },
+  displayName: { fontSize: FontSize.xl, fontWeight: FontWeight.bold, color: Colors.textPrimary },
+  handle: { fontSize: FontSize.base, color: Colors.textMuted },
   bio: { fontSize: FontSize.base, color: Colors.textSecondary, lineHeight: 22, marginTop: 4 },
-  metaText: { fontSize: FontSize.sm, color: Colors.textMuted, marginTop: 2 },
-  statsRow: {
+  bioPlaceholder: { fontSize: FontSize.base, color: Colors.primary, marginTop: 4 },
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 },
+  metaText: { fontSize: FontSize.sm, color: Colors.textMuted },
+
+  // Stats card
+  statsCard: {
     flexDirection: 'row',
     justifyContent: 'space-around',
-    paddingHorizontal: Spacing.xl,
-    paddingVertical: Spacing.md,
     marginHorizontal: Spacing.md,
     marginBottom: Spacing.md,
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.lg,
     backgroundColor: Colors.surface,
     borderRadius: Radii.lg,
     borderWidth: 1,
     borderColor: Colors.surfaceBorder,
   },
-  statItem: { alignItems: 'center', gap: 2 },
+  statItem: { alignItems: 'center', gap: 2, flex: 1 },
   statValue: { fontSize: FontSize.lg, fontWeight: FontWeight.bold, color: Colors.textPrimary },
   statLabel: { fontSize: FontSize.xs, color: Colors.textMuted, fontWeight: FontWeight.medium },
-  statDivider: { width: 1, height: 32, backgroundColor: Colors.surfaceBorder, alignSelf: 'center' },
-  tabsRow: {
+  statDivider: { width: 1, height: 36, backgroundColor: Colors.surfaceBorder, alignSelf: 'center' },
+
+  // Tabs
+  tabsBar: {
     flexDirection: 'row',
     borderTopWidth: 1,
     borderBottomWidth: 1,
     borderColor: Colors.surfaceBorder,
-    marginBottom: Spacing.xs,
   },
   tabBtn: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    paddingVertical: Spacing.sm + 2,
+    gap: 5,
+    paddingVertical: 12,
     borderBottomWidth: 2,
     borderBottomColor: 'transparent',
   },
   tabBtnActive: { borderBottomColor: Colors.primary },
   tabLabel: { fontSize: FontSize.sm, color: Colors.textMuted, fontWeight: FontWeight.medium },
   tabLabelActive: { color: Colors.primary, fontWeight: FontWeight.semibold },
-  gridContainer: { paddingHorizontal: Spacing.sm, paddingBottom: Spacing.xl },
-  gridRow: { gap: 3 },
+  tabCount: {
+    backgroundColor: Colors.surfaceElevated,
+    borderRadius: Radii.full,
+    minWidth: 18,
+    height: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
+  },
+  tabCountActive: { backgroundColor: Colors.primary + '33' },
+  tabCountText: { fontSize: 10, color: Colors.textMuted, fontWeight: FontWeight.semibold },
+  tabCountTextActive: { color: Colors.primary },
+
+  // Grid
+  gridWrapper: { paddingHorizontal: 0, minHeight: 200 },
+  gridRow: { gap: GRID_GAP },
   gridItem: {
-    flex: 1,
-    aspectRatio: 1,
-    maxWidth: '33.3%',
-    borderRadius: Radii.sm,
+    width: GRID_ITEM_SIZE,
+    height: GRID_ITEM_SIZE,
     overflow: 'hidden',
     backgroundColor: Colors.surfaceElevated,
   },
+  gridItemInner: { width: '100%', height: '100%' },
   gridImage: { width: '100%', height: '100%' },
-  gridVideoLabel: {
+  gridTextItem: {
+    padding: 8,
+    backgroundColor: Colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gridTextContent: { fontSize: 11, color: Colors.textSecondary, lineHeight: 16, textAlign: 'center' },
+  gridBadge: {
     position: 'absolute',
     top: 6,
     right: 6,
@@ -601,19 +789,60 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     padding: 3,
   },
-  gridTextPost: {
-    padding: 8,
-    backgroundColor: Colors.surface,
+  gridLikedDot: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: Colors.error,
+  },
+
+  // Grid states
+  gridLoading: {
+    alignItems: 'center',
     justifyContent: 'center',
+    paddingVertical: Spacing.xxl,
+    gap: Spacing.sm,
   },
-  gridTextContent: {
-    fontSize: 10,
+  gridLoadingText: { color: Colors.textMuted, fontSize: FontSize.sm },
+  emptyState: {
+    alignItems: 'center',
+    paddingVertical: Spacing.xxl,
+    paddingHorizontal: Spacing.xl,
+    gap: Spacing.sm,
+  },
+  emptyIconWrapper: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: Colors.surfaceElevated,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Spacing.xs,
+  },
+  emptyTitle: {
+    fontSize: FontSize.md,
+    fontWeight: FontWeight.semibold,
     color: Colors.textSecondary,
-    lineHeight: 14,
+    textAlign: 'center',
   },
-  emptyState: { alignItems: 'center', paddingVertical: Spacing.xxl, gap: Spacing.sm },
-  emptyTitle: { fontSize: FontSize.md, fontWeight: FontWeight.semibold, color: Colors.textSecondary },
-  emptySubtitle: { fontSize: FontSize.base, color: Colors.textMuted, textAlign: 'center', lineHeight: 22 },
+  emptySubtitle: {
+    fontSize: FontSize.base,
+    color: Colors.textMuted,
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  createFirstPostBtn: { marginTop: Spacing.sm, borderRadius: Radii.full, overflow: 'hidden' },
+  createFirstPostGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: 11,
+  },
+  createFirstPostText: { color: '#fff', fontWeight: FontWeight.semibold, fontSize: FontSize.base },
 });
 
 const editStyles = StyleSheet.create({
@@ -624,46 +853,63 @@ const editStyles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: Spacing.md,
     paddingVertical: Spacing.md,
+    paddingTop: 56,
     borderBottomWidth: 1,
     borderBottomColor: Colors.surfaceBorder,
-    paddingTop: 56,
   },
   title: { fontSize: FontSize.md, fontWeight: FontWeight.semibold, color: Colors.textPrimary },
   cancelText: { fontSize: FontSize.base, color: Colors.textSecondary },
   saveText: { fontSize: FontSize.base, color: Colors.primary, fontWeight: FontWeight.semibold },
   avatarSection: { alignItems: 'center', paddingVertical: Spacing.xl },
-  avatarBtn: { position: 'relative', width: 100, height: 100 },
-  avatarImage: { width: 100, height: 100, borderRadius: 50 },
+  avatarBtn: { position: 'relative', width: 104, height: 104 },
+  avatarImage: { width: 104, height: 104, borderRadius: 52 },
   avatarOverlay: {
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    height: 36,
+    height: 38,
     backgroundColor: 'rgba(0,0,0,0.55)',
-    borderBottomLeftRadius: 50,
-    borderBottomRightRadius: 50,
+    borderBottomLeftRadius: 52,
+    borderBottomRightRadius: 52,
     alignItems: 'center',
     justifyContent: 'center',
     flexDirection: 'row',
-    gap: 4,
+    gap: 5,
   },
   avatarOverlayText: { color: '#fff', fontSize: 11, fontWeight: FontWeight.medium },
-  fieldsContainer: { paddingHorizontal: Spacing.md, gap: Spacing.md },
-  field: { gap: 6 },
-  fieldLabel: { fontSize: FontSize.sm, color: Colors.textMuted, fontWeight: FontWeight.semibold, textTransform: 'uppercase', letterSpacing: 0.5 },
+  fieldsContainer: { paddingHorizontal: Spacing.md, gap: Spacing.lg, paddingBottom: Spacing.xxl },
+  field: { gap: 8 },
+  fieldLabel: {
+    fontSize: FontSize.xs,
+    color: Colors.textMuted,
+    fontWeight: FontWeight.semibold,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
   fieldInput: {
     backgroundColor: Colors.surfaceElevated,
     borderRadius: Radii.md,
     paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm + 2,
+    paddingVertical: 13,
     color: Colors.textPrimary,
     fontSize: FontSize.base,
     borderWidth: 1,
     borderColor: Colors.surfaceBorder,
   },
-  usernameRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  atSign: { fontSize: FontSize.base, color: Colors.textMuted, paddingLeft: 4 },
-  bioInput: { minHeight: 90, textAlignVertical: 'top' },
+  usernameRow: { flexDirection: 'row', alignItems: 'center' },
+  atSign: {
+    fontSize: FontSize.base,
+    color: Colors.textMuted,
+    paddingHorizontal: 10,
+    paddingVertical: 13,
+    backgroundColor: Colors.surfaceElevated,
+    borderTopLeftRadius: Radii.md,
+    borderBottomLeftRadius: Radii.md,
+    borderWidth: 1,
+    borderRightWidth: 0,
+    borderColor: Colors.surfaceBorder,
+  },
+  bioInput: { minHeight: 96 },
   charCount: { fontSize: FontSize.xs, color: Colors.textMuted, textAlign: 'right' },
 });

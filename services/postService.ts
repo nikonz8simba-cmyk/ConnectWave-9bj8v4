@@ -142,6 +142,34 @@ export async function togglePostLike(
 }
 
 // ─────────────────────────────────────────────
+// Fetch posts by a specific user (for profile grid)
+// ─────────────────────────────────────────────
+export async function fetchUserPosts(
+  targetUserId: string,
+  currentUserId: string
+): Promise<AppPost[]> {
+  const [postsRes, likesRes] = await Promise.all([
+    supabase
+      .from('posts')
+      .select('*, user_profiles(*)')
+      .eq('user_id', targetUserId)
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('post_likes')
+      .select('post_id')
+      .eq('user_id', currentUserId),
+  ]);
+
+  if (postsRes.error || !postsRes.data) return [];
+
+  const likedIds = new Set<string>(
+    (likesRes.data ?? []).map((l: { post_id: string }) => l.post_id)
+  );
+
+  return (postsRes.data as DbPost[]).map(p => mapDbPostToAppPost(p, likedIds));
+}
+
+// ─────────────────────────────────────────────
 // Create post
 // ─────────────────────────────────────────────
 export async function createPost(
