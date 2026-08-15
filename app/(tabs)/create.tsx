@@ -18,7 +18,6 @@ import { Ionicons, MaterialIcons, MaterialCommunityIcons } from '@expo/vector-ic
 import { LinearGradient } from 'expo-linear-gradient';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { Avatar } from '@/components/ui/Avatar';
 import { MentionInput } from '@/components/ui/MentionInput';
@@ -142,117 +141,44 @@ async function uploadMedia(
     const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
     const storageUrl = `${supabaseUrl}/storage/v1/object/posts-media/${fileName}`;
 
-    if (Platform.OS === 'web') {
-      // ── Web: XMLHttpRequest with upload.onprogress ───────────────────────────
-      const response = await fetch(asset.uri);
-      const blob = await response.blob();
-      const webTotal = blob.size;
-      console.log('[uploadMedia] Web blob size:', formatBytes(webTotal));
+    // ── Universal: fetch blob → XHR with upload.onprogress ─────────────────
+    // Works on Android, iOS, and Web. Avoids FileSystem.uploadAsync which
+    // crashes on Android with a NullPointerException in the RAW enum path.
+    console.log('[uploadMedia] Fetching blob from URI...');
+    onProgress?.({ percentage: 2, uploadedBytes: 0, totalBytes });
 
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            onProgress?.({
-              percentage: Math.round((e.loaded / e.total) * 100),
-              uploadedBytes: e.loaded,
-              totalBytes: e.total,
-            });
-          }
-        };
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) resolve();
-          else reject(new Error(`Upload failed: ${xhr.status} ${xhr.responseText}`));
-        };
-        xhr.onerror = () => reject(new Error('XHR network error'));
-        xhr.open('POST', storageUrl);
-        xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
-        xhr.setRequestHeader('Content-Type', mimeType);
-        xhr.setRequestHeader('x-upsert', 'false');
-        xhr.send(blob);
-      });
+    const response = await fetch(asset.uri);
+    const blob = await response.blob();
+    const resolvedTotal = blob.size > 0 ? blob.size : totalBytes;
+    console.log('[uploadMedia] Blob size:', formatBytes(resolvedTotal));
 
-    } else if (asset.type === 'video') {
-      // ── Native video: FileSystem.uploadAsync with real progress callback ─────
-      // This avoids fetch()/readAsStringAsync truncation AND gives byte-level
-      // progress without loading the entire video into JS memory first.
-      console.log('[uploadMedia] Native video — FileSystem.uploadAsync (RAW)');
-      onProgress?.({ percentage: 0, uploadedBytes: 0, totalBytes });
+    onProgress?.({ percentage: 5, uploadedBytes: 0, totalBytes: resolvedTotal });
 
-      const uploadResult = await FileSystem.uploadAsync(storageUrl, asset.uri, {
-        uploadType: FileSystem.FileSystemUploadType.RAW,
-        httpMethod: 'POST',
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-          'Content-Type': mimeType,
-          'x-upsert': 'false',
-        },
-        uploadProgressCallback: (bytesUploaded: number, bytesTotal: number) => {
-          const resolvedTotal = bytesTotal > 0 ? bytesTotal : totalBytes;
-          const pct =
-            resolvedTotal > 0
-              ? Math.min(99, Math.round((bytesUploaded / resolvedTotal) * 100))
-              : 0;
-          onProgress?.({
-            percentage: pct,
-            uploadedBytes: bytesUploaded,
-            totalBytes: resolvedTotal,
-          });
-        },
-      });
+    await new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.upload.onprogress = (e) => {
+        const loaded = e.lengthComputable ? e.loaded : 0;
+        const total  = e.lengthComputable ? e.total  : resolvedTotal;
+        const pct = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
+        onProgress?.({ percentage: pct, uploadedBytes: loaded, totalBytes: total });
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+        } else {
+          console.error('[uploadMedia] XHR error:', xhr.status, xhr.responseText);
+          reject(new Error(`Upload failed (${xhr.status}): ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error('XHR network error'));
+      xhr.open('POST', storageUrl);
+      xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+      xhr.setRequestHeader('Content-Type', mimeType);
+      xhr.setRequestHeader('x-upsert', 'false');
+      xhr.send(blob);
+    });
 
-      console.log('[uploadMedia] FileSystem.uploadAsync status:', uploadResult.status);
-      if (uploadResult.status < 200 || uploadResult.status >= 300) {
-        console.error('[uploadMedia] Upload error body:', uploadResult.body);
-        return {
-          url: null,
-          error: `Upload failed (${uploadResult.status}): ${uploadResult.body}`,
-        };
-      }
-      onProgress?.({ percentage: 100, uploadedBytes: totalBytes, totalBytes });
-
-    } else {
-      // ── Native image: fetch + FileReader (reliable; simulate progress steps) ─
-      onProgress?.({ percentage: 5, uploadedBytes: 0, totalBytes });
-
-      const response = await fetch(asset.uri);
-      const blob = await response.blob();
-      const imageTotal = blob.size;
-      console.log('[uploadMedia] Native image blob size:', formatBytes(imageTotal));
-
-      onProgress?.({
-        percentage: 35,
-        uploadedBytes: Math.round(imageTotal * 0.35),
-        totalBytes: imageTotal,
-      });
-
-      const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as ArrayBuffer);
-        reader.onerror = (e) => {
-          console.error('[uploadMedia] FileReader error:', e);
-          reject(e);
-        };
-        reader.readAsArrayBuffer(blob);
-      });
-
-      onProgress?.({
-        percentage: 65,
-        uploadedBytes: Math.round(imageTotal * 0.65),
-        totalBytes: imageTotal,
-      });
-
-      const { error } = await supabase.storage
-        .from('posts-media')
-        .upload(fileName, arrayBuffer, { contentType: mimeType, upsert: false });
-
-      if (error) {
-        console.error('[uploadMedia] Supabase error (native image):', error.message, (error as any).details);
-        return { url: null, error: error.message };
-      }
-
-      onProgress?.({ percentage: 100, uploadedBytes: imageTotal, totalBytes: imageTotal });
-    }
+    onProgress?.({ percentage: 100, uploadedBytes: resolvedTotal, totalBytes: resolvedTotal });
 
     const { data } = supabase.storage.from('posts-media').getPublicUrl(fileName);
     console.log('[uploadMedia] Upload successful:', data.publicUrl);
