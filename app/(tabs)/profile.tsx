@@ -18,6 +18,7 @@ import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
 import { useRouter } from 'expo-router';
 import { Avatar } from '@/components/ui/Avatar';
 import { PostOptionsSheet } from '@/components/feature/PostOptionsSheet';
@@ -46,11 +47,28 @@ async function uploadAvatar(uri: string, userId: string): Promise<string | null>
   try {
     const fileName = `${userId}/avatar_${Date.now()}.jpg`;
 
-    // Universal path: fetch → blob → XHR.
-    // Avoids FileReader + ArrayBuffer which silently fails on Android
-    // (same root cause as the video upload regression in create.tsx).
-    const response = await fetch(uri);
+    // Normalise content:// → file:// on Android before fetching.
+    // Android content:// URIs are scoped to the picker process and can become
+    // inaccessible after the picker closes, causing fetch() to return 0-byte blobs.
+    let safeUri = uri;
+    if (Platform.OS === 'android' && uri.startsWith('content://')) {
+      try {
+        const dest = `${FileSystem.cacheDirectory}avatar_${Date.now()}.jpg`;
+        await FileSystem.copyAsync({ from: uri, to: dest });
+        safeUri = dest;
+        console.log('[uploadAvatar] Copied to cache:', dest);
+      } catch (copyErr: any) {
+        console.warn('[uploadAvatar] copyAsync failed, using original URI:', copyErr?.message);
+      }
+    }
+
+    const response = await fetch(safeUri);
     const blob = await response.blob();
+
+    if (blob.size === 0) {
+      console.error('[uploadAvatar] Blob is 0 bytes');
+      return null;
+    }
 
     const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
     const { data: { session } } = await supabase.auth.getSession();

@@ -18,6 +18,7 @@ import { Ionicons, MaterialIcons, MaterialCommunityIcons } from '@expo/vector-ic
 import { LinearGradient } from 'expo-linear-gradient';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
 import * as Location from 'expo-location';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { Avatar } from '@/components/ui/Avatar';
@@ -161,10 +162,30 @@ function formatBytes(bytes: number): string {
 }
 
 /**
+ * Normalise an Android content:// URI to a stable file:// path by copying it
+ * to the app cache directory. On iOS and web, the URI is returned as-is since
+ * iOS already provides file:// URIs and web uses blob: URIs.
+ */
+async function normaliseUri(uri: string, ext: string): Promise<string> {
+  // Only Android content:// URIs need copying
+  if (Platform.OS !== 'android' || !uri.startsWith('content://')) return uri;
+  try {
+    const dest = `${FileSystem.cacheDirectory}media_${Date.now()}.${ext}`;
+    await FileSystem.copyAsync({ from: uri, to: dest });
+    console.log('[normaliseUri] Copied to cache:', dest);
+    return dest;
+  } catch (e: any) {
+    console.warn('[normaliseUri] copyAsync failed, using original URI:', e?.message);
+    return uri;
+  }
+}
+
+/**
  * Universal upload function:
- *  1. fetch(uri) → Blob   — works for file://, content:// and http(s)://
- *  2. Validates blob.size > 0 to catch silent Android content-URI truncation
- *  3. Uploads via XMLHttpRequest for real onprogress events on all platforms
+ *  1. Normalises content:// → file:// via FileSystem.copyAsync (Android only)
+ *  2. fetch(uri) → Blob
+ *  3. Validates blob.size > 0
+ *  4. Uploads via XMLHttpRequest for real onprogress events on all platforms
  */
 async function uploadMedia(
   asset: MediaAsset,
@@ -177,13 +198,16 @@ async function uploadMedia(
     const fileName = `${userId}/${Date.now()}.${ext}`;
     const mimeType = asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg');
 
-    console.log('[uploadMedia] Starting:', { uri: asset.uri, mimeType, fileName });
+    // Normalise content:// → file:// before doing anything else
+    const safeUri = await normaliseUri(asset.uri, ext);
+
+    console.log('[uploadMedia] Starting:', { uri: safeUri, mimeType, fileName });
     onProgress?.({ percentage: 2, uploadedBytes: 0, totalBytes: 0 });
 
     // ── Step 1: Fetch blob ─────────────────────────────────────────────────
     let blob: Blob;
     try {
-      const response = await fetch(asset.uri);
+      const response = await fetch(safeUri);
       if (!response.ok && response.status !== 0) {
         throw new Error(`fetch failed with status ${response.status}`);
       }
@@ -613,9 +637,13 @@ export default function CreateScreen() {
         const asset = result.assets[0];
         const detectedType = asset.type === 'video' ? 'video' : 'image';
         const mimeType = asset.mimeType ?? (detectedType === 'video' ? 'video/mp4' : 'image/jpeg');
-        console.log('[pickMedia] camera asset:', { uri: asset.uri, type: detectedType, mimeType });
+        const rawExt = mimeType.split('/')[1];
+        const ext = rawExt === 'quicktime' ? 'mov' : rawExt ?? (detectedType === 'video' ? 'mp4' : 'jpg');
+        // Normalise immediately so preview & upload both use a stable file:// URI
+        const safeUri = await normaliseUri(asset.uri, ext);
+        console.log('[pickMedia] camera asset:', { uri: safeUri, type: detectedType, mimeType });
         setMedia({
-          uri: asset.uri,
+          uri: safeUri,
           type: detectedType,
           mimeType,
           thumbnailUri: (asset as any).videoThumbnailURI ?? undefined,
@@ -639,9 +667,13 @@ export default function CreateScreen() {
         const asset = result.assets[0];
         const detectedType = asset.type === 'video' ? 'video' : 'image';
         const mimeType = asset.mimeType ?? (detectedType === 'video' ? 'video/mp4' : 'image/jpeg');
-        console.log('[pickMedia] gallery asset:', { uri: asset.uri, type: detectedType, mimeType });
+        const rawExt = mimeType.split('/')[1];
+        const ext = rawExt === 'quicktime' ? 'mov' : rawExt ?? (detectedType === 'video' ? 'mp4' : 'jpg');
+        // Normalise immediately so preview & upload both use a stable file:// URI
+        const safeUri = await normaliseUri(asset.uri, ext);
+        console.log('[pickMedia] gallery asset:', { uri: safeUri, type: detectedType, mimeType });
         setMedia({
-          uri: asset.uri,
+          uri: safeUri,
           type: detectedType,
           mimeType,
           thumbnailUri: (asset as any).videoThumbnailURI ?? undefined,
