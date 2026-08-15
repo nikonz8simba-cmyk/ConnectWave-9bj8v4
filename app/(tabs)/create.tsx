@@ -123,18 +123,6 @@ async function uploadMedia(
 
     console.log('[uploadMedia] Starting upload:', { uri: asset.uri, mimeType, fileName });
 
-    // ── Get file size upfront (best-effort, non-fatal) ───────────────────────
-    let totalBytes = 0;
-    if (Platform.OS !== 'web') {
-      try {
-        const info = await FileSystem.getInfoAsync(asset.uri, { size: true });
-        totalBytes = (info as any).size ?? 0;
-        console.log('[uploadMedia] File size:', formatBytes(totalBytes));
-      } catch {
-        // Progress will show 0 total if size is unavailable
-      }
-    }
-
     // ── Auth token for direct Storage REST calls ─────────────────────────────
     const { data: { session } } = await supabase.auth.getSession();
     const authToken = session?.access_token ?? (process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '');
@@ -149,7 +137,7 @@ async function uploadMedia(
 
     const response = await fetch(asset.uri);
     const blob = await response.blob();
-    const resolvedTotal = blob.size > 0 ? blob.size : totalBytes;
+    const resolvedTotal = blob.size > 0 ? blob.size : 0;
     console.log('[uploadMedia] Blob size:', formatBytes(resolvedTotal));
 
     onProgress?.({ percentage: 5, uploadedBytes: 0, totalBytes: resolvedTotal });
@@ -875,7 +863,7 @@ export default function CreateScreen() {
                       ) : null}
                     </>
                   ) : (
-                    <VideoPreview uri={media.uri} />
+                    <VideoPreview key={media.uri} uri={media.uri} />
                   )}
 
                   {/* Remove button */}
