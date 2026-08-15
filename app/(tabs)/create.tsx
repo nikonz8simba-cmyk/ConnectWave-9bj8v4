@@ -181,11 +181,38 @@ async function normaliseUri(uri: string, ext: string): Promise<string> {
 }
 
 /**
+ * Decode a base64 string into a Uint8Array without using atob (not available
+ * in all React Native / Hermes environments).
+ */
+function base64ToUint8Array(base64: string): Uint8Array {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  // Strip any whitespace / padding
+  const clean = base64.replace(/[^A-Za-z0-9+/]/g, '');
+  const len = clean.length;
+  const outputLen = Math.floor((len * 3) / 4);
+  const out = new Uint8Array(outputLen);
+  let outIdx = 0;
+  for (let i = 0; i < len; i += 4) {
+    const a = chars.indexOf(clean[i]);
+    const b = chars.indexOf(clean[i + 1]);
+    const c = chars.indexOf(clean[i + 2] ?? '=');
+    const d = chars.indexOf(clean[i + 3] ?? '=');
+    if (a === -1 || b === -1) break;
+    out[outIdx++] = (a << 2) | (b >> 4);
+    if (c !== -1) out[outIdx++] = ((b & 0xf) << 4) | (c >> 2);
+    if (d !== -1) out[outIdx++] = ((c & 0x3) << 6) | d;
+  }
+  return out.subarray(0, outIdx);
+}
+
+/**
  * Universal upload function:
  *  1. Normalises content:// → file:// via FileSystem.copyAsync (Android only)
- *  2. fetch(uri) → Blob
- *  3. Validates blob.size > 0
- *  4. Uploads via XMLHttpRequest for real onprogress events on all platforms
+ *  2. Reads file as base64 via FileSystem.readAsStringAsync — the ONLY reliable
+ *     path for large native video files on both iOS and Android (Hermes/JavaScriptCore).
+ *     `fetch(uri) → blob → XHR.send(blob)` silently drops large blobs on iOS.
+ *  3. Decodes base64 → Uint8Array (no atob dependency)
+ *  4. Uploads via XMLHttpRequest with Uint8Array for real onprogress events
  */
 async function uploadMedia(
   asset: MediaAsset,
@@ -198,41 +225,34 @@ async function uploadMedia(
     const fileName = `${userId}/${Date.now()}.${ext}`;
     const mimeType = asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg');
 
-    // Normalise content:// → file:// before doing anything else
+    // Step 1: Normalise content:// → file:// (Android only)
     const safeUri = await normaliseUri(asset.uri, ext);
-
     console.log('[uploadMedia] Starting:', { uri: safeUri, mimeType, fileName });
     onProgress?.({ percentage: 2, uploadedBytes: 0, totalBytes: 0 });
 
-    // ── Step 1: Fetch blob ─────────────────────────────────────────────────
-    let blob: Blob;
+    // Step 2: Read file as base64 via FileSystem
+    // This is reliable on both iOS (file://) and Android (file:// after normalise)
+    let base64: string;
     try {
-      const response = await fetch(safeUri);
-      if (!response.ok && response.status !== 0) {
-        throw new Error(`fetch failed with status ${response.status}`);
-      }
-      blob = await response.blob();
-    } catch (fetchErr: any) {
-      console.error('[uploadMedia] fetch error:', fetchErr?.message);
-      return { url: null, error: `No se pudo leer el archivo: ${fetchErr?.message}` };
+      base64 = await FileSystem.readAsStringAsync(safeUri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+    } catch (fsErr: any) {
+      console.error('[uploadMedia] FileSystem.readAsStringAsync error:', fsErr?.message);
+      return { url: null, error: `No se pudo leer el archivo: ${fsErr?.message}` };
     }
 
-    // ── Step 2: Validate blob size ─────────────────────────────────────────
-    // A 0-byte blob means the content:// URI was inaccessible (Android permission
-    // or temporary URI expired). Surface this explicitly instead of uploading empty.
-    if (blob.size === 0) {
-      console.error('[uploadMedia] Blob is 0 bytes — content URI inaccessible');
-      return {
-        url: null,
-        error: 'El archivo está vacío o no es accesible. Intenta seleccionarlo de nuevo.',
-      };
+    if (!base64 || base64.length === 0) {
+      return { url: null, error: 'El archivo está vacío o no es accesible. Intenta seleccionarlo de nuevo.' };
     }
 
-    const resolvedTotal = blob.size;
-    console.log('[uploadMedia] Blob size:', formatBytes(resolvedTotal));
-    onProgress?.({ percentage: 5, uploadedBytes: 0, totalBytes: resolvedTotal });
+    // Step 3: Decode base64 → Uint8Array
+    const bytes = base64ToUint8Array(base64);
+    const totalBytes = bytes.byteLength;
+    console.log('[uploadMedia] File size:', formatBytes(totalBytes));
+    onProgress?.({ percentage: 5, uploadedBytes: 0, totalBytes });
 
-    // ── Step 3: Upload via XHR ─────────────────────────────────────────────
+    // Step 4: Upload via XHR with Uint8Array (progress works correctly with binary data)
     const { data: { session } } = await supabase.auth.getSession();
     const authToken = session?.access_token ?? (process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '');
     const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
@@ -243,7 +263,7 @@ async function uploadMedia(
 
       xhr.upload.onprogress = (e) => {
         const loaded = e.lengthComputable ? e.loaded : 0;
-        const total  = e.lengthComputable ? e.total  : resolvedTotal;
+        const total  = e.lengthComputable ? e.total  : totalBytes;
         const pct = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
         onProgress?.({ percentage: pct, uploadedBytes: loaded, totalBytes: total });
       };
@@ -264,11 +284,11 @@ async function uploadMedia(
       xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
       xhr.setRequestHeader('Content-Type', mimeType);
       xhr.setRequestHeader('x-upsert', 'false');
-      xhr.timeout = 120_000; // 2 min timeout for large videos
-      xhr.send(blob);
+      xhr.timeout = 180_000; // 3 min timeout for large videos
+      xhr.send(bytes.buffer);
     });
 
-    onProgress?.({ percentage: 100, uploadedBytes: resolvedTotal, totalBytes: resolvedTotal });
+    onProgress?.({ percentage: 100, uploadedBytes: totalBytes, totalBytes });
 
     const { data } = supabase.storage.from('posts-media').getPublicUrl(fileName);
     console.log('[uploadMedia] Success:', data.publicUrl);

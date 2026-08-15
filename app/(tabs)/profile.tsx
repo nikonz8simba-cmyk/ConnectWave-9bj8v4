@@ -43,13 +43,31 @@ function formatStat(n: number): string {
   return String(n);
 }
 
+/** Decode base64 string to Uint8Array without atob (not reliable on all RN/Hermes builds). */
+function base64ToUint8Array(base64: string): Uint8Array {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const clean = base64.replace(/[^A-Za-z0-9+/]/g, '');
+  const len = clean.length;
+  const out = new Uint8Array(Math.floor((len * 3) / 4));
+  let outIdx = 0;
+  for (let i = 0; i < len; i += 4) {
+    const a = chars.indexOf(clean[i]);
+    const b = chars.indexOf(clean[i + 1]);
+    const c = chars.indexOf(clean[i + 2] ?? '=');
+    const d = chars.indexOf(clean[i + 3] ?? '=');
+    if (a === -1 || b === -1) break;
+    out[outIdx++] = (a << 2) | (b >> 4);
+    if (c !== -1) out[outIdx++] = ((b & 0xf) << 4) | (c >> 2);
+    if (d !== -1) out[outIdx++] = ((c & 0x3) << 6) | d;
+  }
+  return out.subarray(0, outIdx);
+}
+
 async function uploadAvatar(uri: string, userId: string): Promise<string | null> {
   try {
     const fileName = `${userId}/avatar_${Date.now()}.jpg`;
 
-    // Normalise content:// → file:// on Android before fetching.
-    // Android content:// URIs are scoped to the picker process and can become
-    // inaccessible after the picker closes, causing fetch() to return 0-byte blobs.
+    // Step 1: Normalise content:// → file:// on Android
     let safeUri = uri;
     if (Platform.OS === 'android' && uri.startsWith('content://')) {
       try {
@@ -62,13 +80,19 @@ async function uploadAvatar(uri: string, userId: string): Promise<string | null>
       }
     }
 
-    const response = await fetch(safeUri);
-    const blob = await response.blob();
+    // Step 2: Read file as base64 via FileSystem (reliable on iOS + Android)
+    // Avoids fetch() → blob → XHR.send(blob) which silently drops data on iOS/Hermes.
+    const base64 = await FileSystem.readAsStringAsync(safeUri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
 
-    if (blob.size === 0) {
-      console.error('[uploadAvatar] Blob is 0 bytes');
+    if (!base64 || base64.length === 0) {
+      console.error('[uploadAvatar] Empty base64 data');
       return null;
     }
+
+    // Step 3: Decode → Uint8Array and upload via XHR
+    const bytes = base64ToUint8Array(base64);
 
     const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
     const { data: { session } } = await supabase.auth.getSession();
@@ -90,7 +114,7 @@ async function uploadAvatar(uri: string, userId: string): Promise<string | null>
       xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
       xhr.setRequestHeader('Content-Type', 'image/jpeg');
       xhr.setRequestHeader('x-upsert', 'true');
-      xhr.send(blob);
+      xhr.send(bytes.buffer);
     });
 
     const { data } = supabase.storage.from('avatars').getPublicUrl(fileName);
