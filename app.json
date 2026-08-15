@@ -42,7 +42,15 @@
           "backgroundColor": "#ffffff"
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "ConnectWave necesita acceso a tu ubicación para adjuntar el lugar a tus posts.",
+          "locationWhenInUsePermission": "ConnectWave necesita acceso a tu ubicación para adjuntar el lugar a tus posts.",
+          "isIosBackgroundLocationEnabled": false
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

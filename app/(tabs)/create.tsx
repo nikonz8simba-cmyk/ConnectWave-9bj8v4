@@ -18,6 +18,7 @@ import { Ionicons, MaterialIcons, MaterialCommunityIcons } from '@expo/vector-ic
 import { LinearGradient } from 'expo-linear-gradient';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
+import * as Location from 'expo-location';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { Avatar } from '@/components/ui/Avatar';
 import { MentionInput } from '@/components/ui/MentionInput';
@@ -67,22 +68,60 @@ type MediaAsset = {
   uri: string;
   type: 'image' | 'video';
   mimeType?: string;
+  /** Thumbnail URI provided by the picker for videos (Android/iOS) */
+  thumbnailUri?: string;
+};
+
+type LocationInfo = {
+  latitude: number;
+  longitude: number;
+  placeName: string;
 };
 
 type UploadProgressInfo = {
-  percentage: number;    // 0–100
+  percentage: number;
   uploadedBytes: number;
   totalBytes: number;
 };
 
 // ─── VideoPreview ─────────────────────────────────────────────────────────────
+// Uses expo-video with a static thumbnail fallback for content:// URIs on Android
+// where the player may fail to initialise before the stream is ready.
 
-function VideoPreview({ uri }: { uri: string }) {
+function VideoPreview({ uri, thumbnailUri }: { uri: string; thumbnailUri?: string }) {
+  const [playerReady, setPlayerReady] = useState(false);
+  const [playerError, setPlayerError] = useState(false);
+
   const player = useVideoPlayer(uri, p => {
     p.loop = true;
     p.muted = true;
-    p.play();
+    try {
+      p.play();
+      setPlayerReady(true);
+    } catch {
+      setPlayerError(true);
+    }
   });
+
+  // If the player has an error or hasn't loaded, show thumbnail / placeholder
+  if (playerError) {
+    return (
+      <View style={[styles.mediaPreviewImage, videoPreviewStyles.fallback]}>
+        {thumbnailUri ? (
+          <Image
+            source={{ uri: thumbnailUri }}
+            style={StyleSheet.absoluteFill}
+            contentFit="cover"
+          />
+        ) : null}
+        <View style={videoPreviewStyles.playOverlay}>
+          <Ionicons name="play-circle" size={52} color="rgba(255,255,255,0.85)" />
+          <Text style={videoPreviewStyles.playText}>Video seleccionado</Text>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <VideoView
       player={player}
@@ -93,6 +132,25 @@ function VideoPreview({ uri }: { uri: string }) {
   );
 }
 
+const videoPreviewStyles = StyleSheet.create({
+  fallback: {
+    backgroundColor: '#0a0a0f',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  playOverlay: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  playText: {
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.medium,
+  },
+});
+
 // ─── Upload helpers ────────────────────────────────────────────────────────────
 
 function formatBytes(bytes: number): string {
@@ -102,14 +160,12 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// Architecture:
-// • Native VIDEO  → FileSystem.uploadAsync (RAW) with uploadProgressCallback
-//                   for real byte-level progress reporting. Avoids
-//                   readAsStringAsync truncation on large files.
-// • Native IMAGE  → fetch + FileReader (reliable for images); simulated
-//                   progress steps since FileReader has no progress API.
-// • Web           → XMLHttpRequest with upload.onprogress for real progress.
-
+/**
+ * Universal upload function:
+ *  1. fetch(uri) → Blob   — works for file://, content:// and http(s)://
+ *  2. Validates blob.size > 0 to catch silent Android content-URI truncation
+ *  3. Uploads via XMLHttpRequest for real onprogress events on all platforms
+ */
 async function uploadMedia(
   asset: MediaAsset,
   userId: string,
@@ -121,35 +177,53 @@ async function uploadMedia(
     const fileName = `${userId}/${Date.now()}.${ext}`;
     const mimeType = asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg');
 
-    console.log('[uploadMedia] Starting upload:', { uri: asset.uri, mimeType, fileName });
+    console.log('[uploadMedia] Starting:', { uri: asset.uri, mimeType, fileName });
+    onProgress?.({ percentage: 2, uploadedBytes: 0, totalBytes: 0 });
 
-    // ── Auth token for direct Storage REST calls ─────────────────────────────
+    // ── Step 1: Fetch blob ─────────────────────────────────────────────────
+    let blob: Blob;
+    try {
+      const response = await fetch(asset.uri);
+      if (!response.ok && response.status !== 0) {
+        throw new Error(`fetch failed with status ${response.status}`);
+      }
+      blob = await response.blob();
+    } catch (fetchErr: any) {
+      console.error('[uploadMedia] fetch error:', fetchErr?.message);
+      return { url: null, error: `No se pudo leer el archivo: ${fetchErr?.message}` };
+    }
+
+    // ── Step 2: Validate blob size ─────────────────────────────────────────
+    // A 0-byte blob means the content:// URI was inaccessible (Android permission
+    // or temporary URI expired). Surface this explicitly instead of uploading empty.
+    if (blob.size === 0) {
+      console.error('[uploadMedia] Blob is 0 bytes — content URI inaccessible');
+      return {
+        url: null,
+        error: 'El archivo está vacío o no es accesible. Intenta seleccionarlo de nuevo.',
+      };
+    }
+
+    const resolvedTotal = blob.size;
+    console.log('[uploadMedia] Blob size:', formatBytes(resolvedTotal));
+    onProgress?.({ percentage: 5, uploadedBytes: 0, totalBytes: resolvedTotal });
+
+    // ── Step 3: Upload via XHR ─────────────────────────────────────────────
     const { data: { session } } = await supabase.auth.getSession();
     const authToken = session?.access_token ?? (process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '');
     const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
     const storageUrl = `${supabaseUrl}/storage/v1/object/posts-media/${fileName}`;
 
-    // ── Universal: fetch blob → XHR with upload.onprogress ─────────────────
-    // Works on Android, iOS, and Web. Avoids FileSystem.uploadAsync which
-    // crashes on Android with a NullPointerException in the RAW enum path.
-    console.log('[uploadMedia] Fetching blob from URI...');
-    onProgress?.({ percentage: 2, uploadedBytes: 0, totalBytes: 0 });
-
-    const response = await fetch(asset.uri);
-    const blob = await response.blob();
-    const resolvedTotal = blob.size > 0 ? blob.size : 0;
-    console.log('[uploadMedia] Blob size:', formatBytes(resolvedTotal));
-
-    onProgress?.({ percentage: 5, uploadedBytes: 0, totalBytes: resolvedTotal });
-
     await new Promise<void>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+
       xhr.upload.onprogress = (e) => {
         const loaded = e.lengthComputable ? e.loaded : 0;
         const total  = e.lengthComputable ? e.total  : resolvedTotal;
         const pct = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
         onProgress?.({ percentage: pct, uploadedBytes: loaded, totalBytes: total });
       };
+
       xhr.onload = () => {
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve();
@@ -158,22 +232,26 @@ async function uploadMedia(
           reject(new Error(`Upload failed (${xhr.status}): ${xhr.responseText}`));
         }
       };
-      xhr.onerror = () => reject(new Error('XHR network error'));
+
+      xhr.onerror = () => reject(new Error('Error de red durante la subida'));
+      xhr.ontimeout = () => reject(new Error('Tiempo de espera agotado'));
+
       xhr.open('POST', storageUrl);
       xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
       xhr.setRequestHeader('Content-Type', mimeType);
       xhr.setRequestHeader('x-upsert', 'false');
+      xhr.timeout = 120_000; // 2 min timeout for large videos
       xhr.send(blob);
     });
 
     onProgress?.({ percentage: 100, uploadedBytes: resolvedTotal, totalBytes: resolvedTotal });
 
     const { data } = supabase.storage.from('posts-media').getPublicUrl(fileName);
-    console.log('[uploadMedia] Upload successful:', data.publicUrl);
+    console.log('[uploadMedia] Success:', data.publicUrl);
     return { url: data.publicUrl, error: null };
   } catch (e: any) {
-    console.error('[uploadMedia] Unexpected exception:', e);
-    return { url: null, error: e?.message ?? 'Upload failed' };
+    console.error('[uploadMedia] Exception:', e?.message);
+    return { url: null, error: e?.message ?? 'Error al subir el archivo' };
   }
 }
 
@@ -186,7 +264,6 @@ function UploadProgressBar({
   progress: number;
   info: UploadProgressInfo | null;
 }) {
-  // Animate the fill width with a spring
   const fillAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -204,33 +281,24 @@ function UploadProgressBar({
     extrapolate: 'clamp',
   });
 
-  const isVideo = info !== null && info.totalBytes > 500 * 1024; // >500 KB → video-like
+  const isVideo = info !== null && info.totalBytes > 500 * 1024;
   const barColor = isVideo ? Colors.info : Colors.primary;
 
   return (
     <View style={progressStyles.container}>
-      {/* Track */}
       <View style={progressStyles.track}>
         <Animated.View
           style={[progressStyles.fill, { width: fillWidth as any, backgroundColor: barColor }]}
         />
-        {/* Shimmer overlay */}
         <View style={[progressStyles.shimmer, { backgroundColor: barColor + '33' }]} />
       </View>
-
-      {/* Info row */}
       <View style={progressStyles.infoRow}>
         <View style={progressStyles.infoLeft}>
-          <ActivityIndicator
-            size="small"
-            color={barColor}
-            style={progressStyles.spinner}
-          />
+          <ActivityIndicator size="small" color={barColor} style={progressStyles.spinner} />
           <Text style={progressStyles.label}>
             {progress < 100 ? 'Subiendo...' : 'Procesando...'}
           </Text>
         </View>
-
         {info && info.totalBytes > 0 ? (
           <View style={progressStyles.infoRight}>
             <Text style={[progressStyles.bytes, { color: Colors.textSecondary }]}>
@@ -239,16 +307,12 @@ function UploadProgressBar({
               {formatBytes(info.totalBytes)}
             </Text>
             <View style={[progressStyles.pctBadge, { backgroundColor: barColor + '22' }]}>
-              <Text style={[progressStyles.pct, { color: barColor }]}>
-                {progress}%
-              </Text>
+              <Text style={[progressStyles.pct, { color: barColor }]}>{progress}%</Text>
             </View>
           </View>
         ) : (
           <View style={[progressStyles.pctBadge, { backgroundColor: barColor + '22' }]}>
-            <Text style={[progressStyles.pct, { color: barColor }]}>
-              {progress}%
-            </Text>
+            <Text style={[progressStyles.pct, { color: barColor }]}>{progress}%</Text>
           </View>
         )}
       </View>
@@ -262,23 +326,9 @@ const progressStyles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: Colors.surfaceBorder,
   },
-  track: {
-    height: 5,
-    backgroundColor: Colors.surface,
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  fill: {
-    height: '100%',
-    borderRadius: 3,
-  },
-  shimmer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-  },
+  track: { height: 5, backgroundColor: Colors.surface, overflow: 'hidden', position: 'relative' },
+  fill: { height: '100%', borderRadius: 3 },
+  shimmer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
   infoRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -286,38 +336,14 @@ const progressStyles = StyleSheet.create({
     paddingHorizontal: Spacing.md,
     paddingVertical: 7,
   },
-  infoLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-  },
+  infoLeft: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   spinner: { transform: [{ scale: 0.7 }] },
-  label: {
-    fontSize: FontSize.xs,
-    color: Colors.textMuted,
-    fontWeight: FontWeight.medium,
-  },
-  infoRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  bytes: {
-    fontSize: FontSize.xs,
-    fontWeight: FontWeight.medium,
-  },
-  separator: {
-    color: Colors.textMuted,
-  },
-  pctBadge: {
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: Radii.full,
-  },
-  pct: {
-    fontSize: FontSize.xs,
-    fontWeight: FontWeight.bold,
-  },
+  label: { fontSize: FontSize.xs, color: Colors.textMuted, fontWeight: FontWeight.medium },
+  infoRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  bytes: { fontSize: FontSize.xs, fontWeight: FontWeight.medium },
+  separator: { color: Colors.textMuted },
+  pctBadge: { paddingHorizontal: 7, paddingVertical: 2, borderRadius: Radii.full },
+  pct: { fontSize: FontSize.xs, fontWeight: FontWeight.bold },
 });
 
 // ─── CharacterRing ────────────────────────────────────────────────────────────
@@ -327,37 +353,15 @@ function CharacterRing({ count, max }: { count: number; max: number }) {
   const size = 28;
   const strokeWidth = 3;
   const remaining = max - count;
-
   const color =
     remaining < 20 ? Colors.error : remaining < 60 ? Colors.warning : Colors.primary;
 
   return (
     <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
-      <View
-        style={{
-          position: 'absolute',
-          width: size,
-          height: size,
-          borderRadius: size / 2,
-          borderWidth: strokeWidth,
-          borderColor: Colors.surfaceBorder,
-        }}
-      />
-      <View
-        style={{
-          position: 'absolute',
-          width: size,
-          height: size,
-          borderRadius: size / 2,
-          borderWidth: strokeWidth,
-          borderColor: color,
-          opacity: Math.max(0.2, ratio),
-        }}
-      />
+      <View style={{ position: 'absolute', width: size, height: size, borderRadius: size / 2, borderWidth: strokeWidth, borderColor: Colors.surfaceBorder }} />
+      <View style={{ position: 'absolute', width: size, height: size, borderRadius: size / 2, borderWidth: strokeWidth, borderColor: color, opacity: Math.max(0.2, ratio) }} />
       {remaining < 40 ? (
-        <Text style={{ fontSize: 9, color, fontWeight: FontWeight.bold }}>
-          {remaining}
-        </Text>
+        <Text style={{ fontSize: 9, color, fontWeight: FontWeight.bold }}>{remaining}</Text>
       ) : null}
     </View>
   );
@@ -366,10 +370,7 @@ function CharacterRing({ count, max }: { count: number; max: number }) {
 // ─── FilterThumbnail ──────────────────────────────────────────────────────────
 
 function FilterThumbnail({
-  filter,
-  uri,
-  active,
-  onPress,
+  filter, uri, active, onPress,
 }: {
   filter: (typeof FILTERS)[number];
   uri: string;
@@ -379,19 +380,12 @@ function FilterThumbnail({
   return (
     <Pressable
       onPress={onPress}
-      style={({ pressed }) => [
-        filterStyles.btn,
-        active ? filterStyles.btnActive : null,
-        pressed ? { opacity: 0.8 } : null,
-      ]}
+      style={({ pressed }) => [filterStyles.btn, active ? filterStyles.btnActive : null, pressed ? { opacity: 0.8 } : null]}
     >
       <View style={[filterStyles.thumb, active ? filterStyles.thumbActive : null]}>
         <Image source={{ uri }} style={filterStyles.thumbImage} contentFit="cover" />
         {filter.tint ? (
-          <View
-            style={[StyleSheet.absoluteFill, { backgroundColor: filter.tint, borderRadius: 8 }]}
-            pointerEvents="none"
-          />
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: filter.tint, borderRadius: 8 }]} pointerEvents="none" />
         ) : null}
         {active ? (
           <View style={filterStyles.thumbCheck}>
@@ -399,9 +393,7 @@ function FilterThumbnail({
           </View>
         ) : null}
       </View>
-      <Text style={[filterStyles.label, active ? filterStyles.labelActive : null]}>
-        {filter.label}
-      </Text>
+      <Text style={[filterStyles.label, active ? filterStyles.labelActive : null]}>{filter.label}</Text>
     </Pressable>
   );
 }
@@ -409,29 +401,52 @@ function FilterThumbnail({
 const filterStyles = StyleSheet.create({
   btn: { alignItems: 'center', gap: 5, paddingVertical: 4 },
   btnActive: {},
-  thumb: {
-    width: 58,
-    height: 58,
-    borderRadius: 10,
-    overflow: 'hidden',
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
+  thumb: { width: 58, height: 58, borderRadius: 10, overflow: 'hidden', borderWidth: 2, borderColor: 'transparent' },
   thumbActive: { borderColor: Colors.primary },
   thumbImage: { width: '100%', height: '100%' },
   thumbCheck: {
-    position: 'absolute',
-    bottom: 4,
-    right: 4,
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    backgroundColor: Colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
+    position: 'absolute', bottom: 4, right: 4,
+    width: 16, height: 16, borderRadius: 8,
+    backgroundColor: Colors.primary, alignItems: 'center', justifyContent: 'center',
   },
   label: { fontSize: 10, color: Colors.textMuted, fontWeight: FontWeight.medium },
   labelActive: { color: Colors.primary, fontWeight: FontWeight.semibold },
+});
+
+// ─── LocationPill ─────────────────────────────────────────────────────────────
+
+function LocationPill({ location, onRemove }: { location: LocationInfo; onRemove: () => void }) {
+  return (
+    <View style={locationStyles.pill}>
+      <Ionicons name="location" size={13} color={Colors.success} />
+      <Text style={locationStyles.pillText} numberOfLines={1}>{location.placeName}</Text>
+      <Pressable onPress={onRemove} hitSlop={6}>
+        <Ionicons name="close-circle" size={16} color={Colors.textMuted} />
+      </Pressable>
+    </View>
+  );
+}
+
+const locationStyles = StyleSheet.create({
+  pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(74,222,128,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(74,222,128,0.3)',
+    borderRadius: Radii.full,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    alignSelf: 'flex-start',
+    maxWidth: SCREEN_WIDTH - 64,
+  },
+  pillText: {
+    fontSize: FontSize.sm,
+    color: Colors.success,
+    fontWeight: FontWeight.medium,
+    flex: 1,
+  },
 });
 
 // ─── MediaPickerButtons ────────────────────────────────────────────────────────
@@ -440,12 +455,14 @@ function MediaPickerButtons({
   onCamera,
   onGallery,
   onPickVideo,
-  hasMedia,
+  onLocation,
+  locationLoading,
 }: {
   onCamera: () => void;
   onGallery: () => void;
   onPickVideo: () => void;
-  hasMedia: boolean;
+  onLocation: () => void;
+  locationLoading: boolean;
 }) {
   return (
     <View style={pickerStyles.row}>
@@ -453,10 +470,7 @@ function MediaPickerButtons({
         style={({ pressed }) => [pickerStyles.btn, pressed ? pickerStyles.btnPressed : null]}
         onPress={onCamera}
       >
-        <LinearGradient
-          colors={[Colors.primary + '22', Colors.primary + '11']}
-          style={pickerStyles.btnInner}
-        >
+        <LinearGradient colors={[Colors.primary + '22', Colors.primary + '11']} style={pickerStyles.btnInner}>
           <Ionicons name="camera" size={20} color={Colors.primary} />
           <Text style={pickerStyles.label}>Cámara</Text>
         </LinearGradient>
@@ -466,10 +480,7 @@ function MediaPickerButtons({
         style={({ pressed }) => [pickerStyles.btn, pressed ? pickerStyles.btnPressed : null]}
         onPress={onGallery}
       >
-        <LinearGradient
-          colors={[Colors.secondary + '22', Colors.secondary + '11']}
-          style={pickerStyles.btnInner}
-        >
+        <LinearGradient colors={[Colors.secondary + '22', Colors.secondary + '11']} style={pickerStyles.btnInner}>
           <Ionicons name="images" size={20} color={Colors.secondary} />
           <Text style={[pickerStyles.label, { color: Colors.secondary }]}>Galería</Text>
         </LinearGradient>
@@ -479,10 +490,7 @@ function MediaPickerButtons({
         style={({ pressed }) => [pickerStyles.btn, pressed ? pickerStyles.btnPressed : null]}
         onPress={onPickVideo}
       >
-        <LinearGradient
-          colors={['rgba(56,189,248,0.15)', 'rgba(56,189,248,0.07)']}
-          style={pickerStyles.btnInner}
-        >
+        <LinearGradient colors={['rgba(56,189,248,0.15)', 'rgba(56,189,248,0.07)']} style={pickerStyles.btnInner}>
           <Ionicons name="videocam" size={20} color={Colors.info} />
           <Text style={[pickerStyles.label, { color: Colors.info }]}>Video</Text>
         </LinearGradient>
@@ -490,12 +498,15 @@ function MediaPickerButtons({
 
       <Pressable
         style={({ pressed }) => [pickerStyles.btn, pressed ? pickerStyles.btnPressed : null]}
+        onPress={onLocation}
+        disabled={locationLoading}
       >
-        <LinearGradient
-          colors={['rgba(74,222,128,0.15)', 'rgba(74,222,128,0.07)']}
-          style={pickerStyles.btnInner}
-        >
-          <Ionicons name="location" size={20} color={Colors.success} />
+        <LinearGradient colors={['rgba(74,222,128,0.15)', 'rgba(74,222,128,0.07)']} style={pickerStyles.btnInner}>
+          {locationLoading ? (
+            <ActivityIndicator size="small" color={Colors.success} />
+          ) : (
+            <Ionicons name="location" size={20} color={Colors.success} />
+          )}
           <Text style={[pickerStyles.label, { color: Colors.success }]}>Lugar</Text>
         </LinearGradient>
       </Pressable>
@@ -522,12 +533,9 @@ const pickerStyles = StyleSheet.create({
     borderRadius: Radii.sm,
     borderWidth: 1,
     borderColor: Colors.surfaceBorder,
+    minHeight: 58,
   },
-  label: {
-    fontSize: FontSize.xs,
-    color: Colors.primary,
-    fontWeight: FontWeight.medium,
-  },
+  label: { fontSize: FontSize.xs, color: Colors.primary, fontWeight: FontWeight.medium },
 });
 
 // ─── Main Screen ──────────────────────────────────────────────────────────────
@@ -543,6 +551,8 @@ export default function CreateScreen() {
   const [media, setMedia] = useState<MediaAsset | null>(null);
   const [activeFilter, setActiveFilter] = useState('none');
   const [audience, setAudience] = useState('public');
+  const [location, setLocation] = useState<LocationInfo | null>(null);
+  const [locationLoading, setLocationLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadProgressInfo, setUploadProgressInfo] = useState<UploadProgressInfo | null>(null);
@@ -578,20 +588,23 @@ export default function CreateScreen() {
     setMedia(null);
     setActiveFilter('none');
     setAudience('public');
+    setLocation(null);
     setUploadProgress(0);
     setUploadProgressInfo(null);
   }, []);
+
+  // ── Media picker ──────────────────────────────────────────────────────────
 
   const pickMedia = useCallback(async (source: 'camera' | 'gallery', forceVideo = false) => {
     if (source === 'camera') {
       const { status } = await ImagePicker.requestCameraPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permiso requerido', 'Necesitamos acceso a tu cámara para grabar videos y fotos.');
+        Alert.alert('Permiso requerido', 'Necesitamos acceso a tu cámara para capturar fotos y videos.');
         return;
       }
       const result = await ImagePicker.launchCameraAsync({
         mediaTypes: forceVideo ? ['videos'] : ['images', 'videos'],
-        allowsEditing: true,
+        allowsEditing: !forceVideo,
         quality: 0.85,
         videoMaxDuration: 60,
         videoQuality: ImagePicker.UIImagePickerControllerQualityType.Medium,
@@ -601,21 +614,23 @@ export default function CreateScreen() {
         const detectedType = asset.type === 'video' ? 'video' : 'image';
         const mimeType = asset.mimeType ?? (detectedType === 'video' ? 'video/mp4' : 'image/jpeg');
         console.log('[pickMedia] camera asset:', { uri: asset.uri, type: detectedType, mimeType });
-        setMedia({ uri: asset.uri, type: detectedType, mimeType });
+        setMedia({
+          uri: asset.uri,
+          type: detectedType,
+          mimeType,
+          thumbnailUri: (asset as any).videoThumbnailURI ?? undefined,
+        });
         setActiveFilter('none');
       }
     } else {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert(
-          'Permiso requerido',
-          'Necesitamos acceso a tu galería para seleccionar fotos y videos.'
-        );
+        Alert.alert('Permiso requerido', 'Necesitamos acceso a tu galería para seleccionar fotos y videos.');
         return;
       }
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: forceVideo ? ['videos'] : ['images', 'videos'],
-        allowsEditing: true,
+        allowsEditing: !forceVideo,
         quality: 0.85,
         videoMaxDuration: 60,
         videoQuality: ImagePicker.UIImagePickerControllerQualityType.Medium,
@@ -625,11 +640,82 @@ export default function CreateScreen() {
         const detectedType = asset.type === 'video' ? 'video' : 'image';
         const mimeType = asset.mimeType ?? (detectedType === 'video' ? 'video/mp4' : 'image/jpeg');
         console.log('[pickMedia] gallery asset:', { uri: asset.uri, type: detectedType, mimeType });
-        setMedia({ uri: asset.uri, type: detectedType, mimeType });
+        setMedia({
+          uri: asset.uri,
+          type: detectedType,
+          mimeType,
+          thumbnailUri: (asset as any).videoThumbnailURI ?? undefined,
+        });
         setActiveFilter('none');
       }
     }
   }, []);
+
+  // ── Geolocation ────────────────────────────────────────────────────────────
+
+  const handleLocation = useCallback(async () => {
+    // Toggle off if already set
+    if (location) {
+      setLocation(null);
+      return;
+    }
+
+    setLocationLoading(true);
+    try {
+      // 1. Request foreground permission
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Permiso requerido',
+          'ConnectWave necesita acceso a tu ubicación para adjuntar el lugar al post.\n\nPuedes habilitarlo en Ajustes > Aplicaciones > ConnectWave > Permisos.',
+          [{ text: 'Entendido' }]
+        );
+        setLocationLoading(false);
+        return;
+      }
+
+      // 2. Get current position (balanced accuracy for speed)
+      const pos = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      const { latitude, longitude } = pos.coords;
+      let placeName = `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+
+      // 3. Reverse geocode to get human-readable name
+      try {
+        const [geocode] = await Location.reverseGeocodeAsync({ latitude, longitude });
+        if (geocode) {
+          const parts: string[] = [];
+          if (geocode.street) parts.push(geocode.street);
+          if (geocode.district) parts.push(geocode.district);
+          if (geocode.city) parts.push(geocode.city);
+          if (geocode.country) parts.push(geocode.country);
+          if (parts.length > 0) {
+            // Show "Street, City, Country" (max 3 parts for readability)
+            placeName = parts.slice(0, 3).join(', ');
+          }
+        }
+      } catch (geoErr) {
+        // Reverse geocode is optional — fall back to coords
+        console.warn('[handleLocation] reverseGeocode failed, using coords:', geoErr);
+      }
+
+      setLocation({ latitude, longitude, placeName });
+      console.log('[handleLocation] Location set:', { latitude, longitude, placeName });
+    } catch (err: any) {
+      console.error('[handleLocation] Error:', err?.message);
+      Alert.alert(
+        'No se pudo obtener la ubicación',
+        'Asegúrate de tener el GPS activado e intenta de nuevo.',
+        [{ text: 'OK' }]
+      );
+    } finally {
+      setLocationLoading(false);
+    }
+  }, [location]);
+
+  // ── Publish ────────────────────────────────────────────────────────────────
 
   const handlePublish = useCallback(async () => {
     if (!canPublish) return;
@@ -665,13 +751,17 @@ export default function CreateScreen() {
       }
     }
 
-    // Brief publishing step
     setUploadProgress(100);
 
-    const finalContent = [
-      content.trim(),
-      selectedTags.map(id => MOOD_TAGS.find(t => t.id === id)?.label).filter(Boolean).join(' '),
-    ]
+    // Build final content: caption + mood tags + optional location footer
+    const moodLine = selectedTags
+      .map(id => MOOD_TAGS.find(t => t.id === id)?.label)
+      .filter(Boolean)
+      .join(' ');
+
+    const locationLine = location ? `📍 ${location.placeName}` : '';
+
+    const finalContent = [content.trim(), moodLine, locationLine]
       .filter(Boolean)
       .join('\n\n');
 
@@ -689,7 +779,7 @@ export default function CreateScreen() {
       { text: 'Ver Feed', onPress: () => { handleReset(); router.push('/(tabs)/'); } },
       { text: 'Nuevo post', onPress: handleReset, style: 'cancel' },
     ]);
-  }, [canPublish, profile, media, content, selectedTags, addPost, router, handleReset]);
+  }, [canPublish, profile, media, content, selectedTags, location, addPost, router, handleReset]);
 
   const currentFilter = FILTERS.find(f => f.id === activeFilter) ?? FILTERS[0];
   const selectedAudience = AUDIENCE_OPTIONS.find(a => a.id === audience) ?? AUDIENCE_OPTIONS[0];
@@ -761,10 +851,7 @@ export default function CreateScreen() {
               <View style={styles.composeTopRow}>
                 <Text style={styles.authorName}>{profile?.name ?? 'Tu nombre'}</Text>
                 {/* Audience pill */}
-                <Pressable
-                  style={styles.audiencePill}
-                  onPress={() => setShowAudience(v => !v)}
-                >
+                <Pressable style={styles.audiencePill} onPress={() => setShowAudience(v => !v)}>
                   <Ionicons name={selectedAudience.icon} size={12} color={Colors.primary} />
                   <Text style={styles.audiencePillText}>{selectedAudience.label}</Text>
                   <Ionicons name="chevron-down" size={11} color={Colors.primary} />
@@ -777,28 +864,14 @@ export default function CreateScreen() {
                   {AUDIENCE_OPTIONS.map(opt => (
                     <Pressable
                       key={opt.id}
-                      style={[
-                        styles.audienceMenuItem,
-                        audience === opt.id ? styles.audienceMenuItemActive : null,
-                      ]}
+                      style={[styles.audienceMenuItem, audience === opt.id ? styles.audienceMenuItemActive : null]}
                       onPress={() => { setAudience(opt.id); setShowAudience(false); }}
                     >
-                      <Ionicons
-                        name={opt.icon}
-                        size={15}
-                        color={audience === opt.id ? Colors.primary : Colors.textMuted}
-                      />
-                      <Text
-                        style={[
-                          styles.audienceMenuText,
-                          audience === opt.id ? styles.audienceMenuTextActive : null,
-                        ]}
-                      >
+                      <Ionicons name={opt.icon} size={15} color={audience === opt.id ? Colors.primary : Colors.textMuted} />
+                      <Text style={[styles.audienceMenuText, audience === opt.id ? styles.audienceMenuTextActive : null]}>
                         {opt.label}
                       </Text>
-                      {audience === opt.id ? (
-                        <Ionicons name="checkmark" size={14} color={Colors.primary} />
-                      ) : null}
+                      {audience === opt.id ? <Ionicons name="checkmark" size={14} color={Colors.primary} /> : null}
                     </Pressable>
                   ))}
                 </View>
@@ -817,6 +890,11 @@ export default function CreateScreen() {
                 inputStyle={styles.captionInput}
                 minHeight={90}
               />
+
+              {/* Location pill — shown below caption when set */}
+              {location ? (
+                <LocationPill location={location} onRemove={() => setLocation(null)} />
+              ) : null}
             </View>
           </View>
 
@@ -838,7 +916,6 @@ export default function CreateScreen() {
                 },
               ]}
             >
-              {/* Preview card */}
               <View style={styles.mediaCard}>
                 <View style={styles.mediaPreviewWrapper}>
                   {media.type === 'image' ? (
@@ -851,19 +928,14 @@ export default function CreateScreen() {
                       />
                       {currentFilter.tint ? (
                         <View
-                          style={[
-                            StyleSheet.absoluteFill,
-                            {
-                              backgroundColor: currentFilter.tint,
-                              borderRadius: Radii.md,
-                            },
-                          ]}
+                          style={[StyleSheet.absoluteFill, { backgroundColor: currentFilter.tint, borderRadius: Radii.md }]}
                           pointerEvents="none"
                         />
                       ) : null}
                     </>
                   ) : (
-                    <VideoPreview key={media.uri} uri={media.uri} />
+                    /* key forces remount when URI changes so useVideoPlayer reinitialises */
+                    <VideoPreview key={media.uri} uri={media.uri} thumbnailUri={media.thumbnailUri} />
                   )}
 
                   {/* Remove button */}
@@ -879,21 +951,14 @@ export default function CreateScreen() {
 
                   {/* Media type badge */}
                   <View style={styles.mediaBadge}>
-                    <Ionicons
-                      name={media.type === 'video' ? 'videocam' : 'image'}
-                      size={12}
-                      color="#fff"
-                    />
+                    <Ionicons name={media.type === 'video' ? 'videocam' : 'image'} size={12} color="#fff" />
                     <Text style={styles.mediaBadgeText}>
                       {media.type === 'video' ? 'Video' : 'Foto'}
                     </Text>
                   </View>
 
                   {/* Change media button */}
-                  <Pressable
-                    style={styles.changeMediaBtn}
-                    onPress={() => pickMedia('gallery')}
-                  >
+                  <Pressable style={styles.changeMediaBtn} onPress={() => pickMedia('gallery')}>
                     <Ionicons name="swap-horizontal" size={14} color="#fff" />
                     <Text style={styles.changeMediaText}>Cambiar</Text>
                   </Pressable>
@@ -923,15 +988,8 @@ export default function CreateScreen() {
               </View>
             </Animated.View>
           ) : (
-            /* No media placeholder */
-            <Pressable
-              style={styles.mediaPlaceholder}
-              onPress={() => pickMedia('gallery')}
-            >
-              <LinearGradient
-                colors={[Colors.surfaceElevated, Colors.surface]}
-                style={styles.mediaPlaceholderInner}
-              >
+            <Pressable style={styles.mediaPlaceholder} onPress={() => pickMedia('gallery')}>
+              <LinearGradient colors={[Colors.surfaceElevated, Colors.surface]} style={styles.mediaPlaceholderInner}>
                 <LinearGradient
                   colors={[Colors.primary + '30', Colors.secondary + '20']}
                   style={styles.placeholderIconBg}
@@ -939,9 +997,7 @@ export default function CreateScreen() {
                   <Ionicons name="add-circle-outline" size={36} color={Colors.primary} />
                 </LinearGradient>
                 <Text style={styles.placeholderTitle}>Agregar foto o video</Text>
-                <Text style={styles.placeholderSub}>
-                  Toca para seleccionar desde tu galería
-                </Text>
+                <Text style={styles.placeholderSub}>Toca para seleccionar desde tu galería</Text>
               </LinearGradient>
             </Pressable>
           )}
@@ -959,16 +1015,10 @@ export default function CreateScreen() {
                 return (
                   <Pressable
                     key={tag.id}
-                    style={({ pressed }) => [
-                      styles.tag,
-                      active ? styles.tagActive : null,
-                      pressed ? { opacity: 0.75 } : null,
-                    ]}
+                    style={({ pressed }) => [styles.tag, active ? styles.tagActive : null, pressed ? { opacity: 0.75 } : null]}
                     onPress={() => toggleTag(tag.id)}
                   >
-                    <Text style={[styles.tagText, active ? styles.tagTextActive : null]}>
-                      {tag.label}
-                    </Text>
+                    <Text style={[styles.tagText, active ? styles.tagTextActive : null]}>{tag.label}</Text>
                   </Pressable>
                 );
               })}
@@ -997,7 +1047,8 @@ export default function CreateScreen() {
             onCamera={() => pickMedia('camera')}
             onGallery={() => pickMedia('gallery')}
             onPickVideo={() => pickMedia('gallery', true)}
-            hasMedia={media != null}
+            onLocation={handleLocation}
+            locationLoading={locationLoading}
           />
           {/* Character counter row */}
           <View style={styles.counterRow}>
@@ -1007,20 +1058,14 @@ export default function CreateScreen() {
                   styles.counterFill,
                   {
                     width: `${Math.min(100, (content.length / MAX_CHARS) * 100)}%` as any,
-                    backgroundColor:
-                      remaining < 20 ? Colors.error : remaining < 60 ? Colors.warning : Colors.primary,
+                    backgroundColor: remaining < 20 ? Colors.error : remaining < 60 ? Colors.warning : Colors.primary,
                   },
                 ]}
               />
             </View>
             <View style={styles.counterRight}>
               <CharacterRing count={content.length} max={MAX_CHARS} />
-              <Text
-                style={[
-                  styles.counterText,
-                  remaining < 20 ? { color: Colors.error } : null,
-                ]}
-              >
+              <Text style={[styles.counterText, remaining < 20 ? { color: Colors.error } : null]}>
                 {remaining}
               </Text>
             </View>
@@ -1037,7 +1082,6 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   container: { flex: 1, backgroundColor: Colors.background },
 
-  // Header
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1050,11 +1094,7 @@ const styles = StyleSheet.create({
   },
   headerBtn: { minWidth: 72 },
   clearText: { color: Colors.textMuted, fontSize: FontSize.base },
-  headerTitle: {
-    fontSize: FontSize.md,
-    fontWeight: FontWeight.semibold,
-    color: Colors.textPrimary,
-  },
+  headerTitle: { fontSize: FontSize.md, fontWeight: FontWeight.semibold, color: Colors.textPrimary },
   publishBtn: {
     paddingHorizontal: Spacing.md + 4,
     height: 38,
@@ -1063,18 +1103,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     minWidth: 88,
   },
-  publishText: {
-    color: '#fff',
-    fontWeight: FontWeight.semibold,
-    fontSize: FontSize.base,
-  },
+  publishText: { color: '#fff', fontWeight: FontWeight.semibold, fontSize: FontSize.base },
   publishDisabled: { color: Colors.textMuted },
 
-  // Scroll
   scroll: { flex: 1 },
   scrollContent: { paddingBottom: Spacing.md },
 
-  // Compose row
   composeRow: {
     flexDirection: 'row',
     paddingHorizontal: Spacing.md,
@@ -1084,18 +1118,9 @@ const styles = StyleSheet.create({
     borderBottomColor: Colors.surfaceBorder,
   },
   composeRight: { flex: 1, gap: 8 },
-  composeTopRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  authorName: {
-    fontSize: FontSize.base,
-    fontWeight: FontWeight.semibold,
-    color: Colors.textPrimary,
-  },
+  composeTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  authorName: { fontSize: FontSize.base, fontWeight: FontWeight.semibold, color: Colors.textPrimary },
 
-  // Audience pill
   audiencePill: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1107,13 +1132,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Colors.primary + '40',
   },
-  audiencePillText: {
-    fontSize: FontSize.xs,
-    color: Colors.primary,
-    fontWeight: FontWeight.semibold,
-  },
-
-  // Audience dropdown
+  audiencePillText: { fontSize: FontSize.xs, color: Colors.primary, fontWeight: FontWeight.semibold },
   audienceMenu: {
     backgroundColor: Colors.surfaceElevated,
     borderRadius: Radii.md,
@@ -1135,7 +1154,6 @@ const styles = StyleSheet.create({
   audienceMenuText: { flex: 1, fontSize: FontSize.sm, color: Colors.textSecondary },
   audienceMenuTextActive: { color: Colors.primary, fontWeight: FontWeight.semibold },
 
-  // Caption input
   captionInput: {
     color: Colors.textPrimary,
     fontSize: FontSize.md,
@@ -1144,11 +1162,7 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
   },
 
-  // Media section
-  mediaSection: {
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-  },
+  mediaSection: { paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm },
   mediaCard: {
     backgroundColor: Colors.surface,
     borderRadius: Radii.lg,
@@ -1156,206 +1170,101 @@ const styles = StyleSheet.create({
     borderColor: Colors.surfaceBorder,
     overflow: 'hidden',
   },
-  mediaPreviewWrapper: {
-    position: 'relative',
-    backgroundColor: Colors.surfaceElevated,
-  },
-  mediaPreviewImage: {
-    width: '100%',
-    height: MEDIA_HEIGHT,
-  },
+  mediaPreviewWrapper: { position: 'relative', backgroundColor: Colors.surfaceElevated },
+  mediaPreviewImage: { width: '100%', height: MEDIA_HEIGHT },
 
-  // Overlay controls
-  removeBtn: {
-    position: 'absolute',
-    top: 10,
-    right: 10,
-  },
+  removeBtn: { position: 'absolute', top: 10, right: 10 },
   removeBtnInner: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
+    width: 26, height: 26, borderRadius: 13,
     backgroundColor: 'rgba(0,0,0,0.7)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
   },
   mediaBadge: {
-    position: 'absolute',
-    bottom: 10,
-    left: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
+    position: 'absolute', bottom: 10, left: 10,
+    flexDirection: 'row', alignItems: 'center', gap: 4,
     backgroundColor: 'rgba(0,0,0,0.65)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingHorizontal: 8, paddingVertical: 4,
     borderRadius: Radii.sm,
   },
   mediaBadgeText: { color: '#fff', fontSize: FontSize.xs, fontWeight: FontWeight.semibold },
   changeMediaBtn: {
-    position: 'absolute',
-    bottom: 10,
-    right: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
+    position: 'absolute', bottom: 10, right: 10,
+    flexDirection: 'row', alignItems: 'center', gap: 4,
     backgroundColor: 'rgba(0,0,0,0.65)',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    paddingHorizontal: 10, paddingVertical: 5,
     borderRadius: Radii.sm,
   },
   changeMediaText: { color: '#fff', fontSize: FontSize.xs, fontWeight: FontWeight.medium },
 
-  // Filters
   filtersSection: {
     paddingHorizontal: Spacing.sm,
     paddingTop: Spacing.sm,
     paddingBottom: Spacing.xs,
   },
   filtersSectionTitle: {
-    fontSize: FontSize.xs,
-    fontWeight: FontWeight.semibold,
-    color: Colors.textMuted,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    paddingHorizontal: 4,
-    marginBottom: Spacing.xs,
+    fontSize: FontSize.xs, fontWeight: FontWeight.semibold,
+    color: Colors.textMuted, textTransform: 'uppercase', letterSpacing: 1,
+    paddingHorizontal: 4, marginBottom: Spacing.xs,
   },
-  filtersRow: {
-    flexDirection: 'row',
-    gap: 10,
-    paddingHorizontal: 4,
-    paddingBottom: Spacing.sm,
-  },
+  filtersRow: { flexDirection: 'row', gap: 10, paddingHorizontal: 4, paddingBottom: Spacing.sm },
 
-  // Media placeholder
   mediaPlaceholder: {
-    marginHorizontal: Spacing.md,
-    marginVertical: Spacing.sm,
-    borderRadius: Radii.lg,
-    overflow: 'hidden',
-    borderWidth: 1.5,
-    borderColor: Colors.surfaceBorder,
-    borderStyle: 'dashed',
+    marginHorizontal: Spacing.md, marginVertical: Spacing.sm,
+    borderRadius: Radii.lg, overflow: 'hidden',
+    borderWidth: 1.5, borderColor: Colors.surfaceBorder, borderStyle: 'dashed',
   },
   mediaPlaceholderInner: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: Spacing.xl,
-    gap: Spacing.sm,
+    alignItems: 'center', justifyContent: 'center',
+    paddingVertical: Spacing.xl, gap: Spacing.sm,
   },
   placeholderIconBg: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: Spacing.xs,
+    width: 72, height: 72, borderRadius: 36,
+    alignItems: 'center', justifyContent: 'center', marginBottom: Spacing.xs,
   },
-  placeholderTitle: {
-    fontSize: FontSize.md,
-    fontWeight: FontWeight.semibold,
-    color: Colors.textSecondary,
-  },
-  placeholderSub: {
-    fontSize: FontSize.sm,
-    color: Colors.textMuted,
-    textAlign: 'center',
-  },
+  placeholderTitle: { fontSize: FontSize.md, fontWeight: FontWeight.semibold, color: Colors.textSecondary },
+  placeholderSub: { fontSize: FontSize.sm, color: Colors.textMuted, textAlign: 'center' },
 
-  // Tags section
   section: {
     paddingHorizontal: Spacing.md,
     paddingVertical: Spacing.md,
     borderTopWidth: 1,
     borderTopColor: Colors.surfaceBorder,
   },
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: Spacing.sm,
-  },
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: Spacing.sm },
   sectionTitle: {
-    fontSize: FontSize.sm,
-    fontWeight: FontWeight.semibold,
-    color: Colors.textMuted,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    flex: 1,
+    fontSize: FontSize.sm, fontWeight: FontWeight.semibold,
+    color: Colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, flex: 1,
   },
-  sectionSubtitle: {
-    fontSize: FontSize.xs,
-    color: Colors.textMuted,
-  },
+  sectionSubtitle: { fontSize: FontSize.xs, color: Colors.textMuted },
   tagsWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   tag: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingHorizontal: 14, paddingVertical: 8,
     borderRadius: Radii.full,
     backgroundColor: Colors.surfaceElevated,
-    borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
+    borderWidth: 1, borderColor: Colors.surfaceBorder,
   },
-  tagActive: {
-    backgroundColor: Colors.primary + '25',
-    borderColor: Colors.primary,
-  },
-  tagText: {
-    fontSize: FontSize.sm,
-    color: Colors.textSecondary,
-    fontWeight: FontWeight.medium,
-  },
+  tagActive: { backgroundColor: Colors.primary + '25', borderColor: Colors.primary },
+  tagText: { fontSize: FontSize.sm, color: Colors.textSecondary, fontWeight: FontWeight.medium },
   tagTextActive: { color: Colors.primaryLight },
 
-  // Tips
   tipsCard: {
-    marginHorizontal: Spacing.md,
-    marginTop: Spacing.xs,
+    marginHorizontal: Spacing.md, marginTop: Spacing.xs,
     padding: Spacing.md,
-    backgroundColor: Colors.surface,
-    borderRadius: Radii.md,
-    borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
-    gap: 6,
+    backgroundColor: Colors.surface, borderRadius: Radii.md,
+    borderWidth: 1, borderColor: Colors.surfaceBorder, gap: 6,
   },
   tipsRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 },
-  tipsTitle: {
-    fontSize: FontSize.sm,
-    fontWeight: FontWeight.semibold,
-    color: Colors.textSecondary,
-  },
+  tipsTitle: { fontSize: FontSize.sm, fontWeight: FontWeight.semibold, color: Colors.textSecondary },
   tipItem: { fontSize: FontSize.sm, color: Colors.textMuted, lineHeight: 20 },
 
-  // Bottom toolbar
-  toolbar: {
-    backgroundColor: Colors.background,
-    borderTopWidth: 1,
-    borderTopColor: Colors.surfaceBorder,
-  },
+  toolbar: { backgroundColor: Colors.background, borderTopWidth: 1, borderTopColor: Colors.surfaceBorder },
   counterRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: Spacing.md,
-    paddingBottom: Spacing.sm,
-    gap: Spacing.sm,
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: Spacing.md, paddingBottom: Spacing.sm, gap: Spacing.sm,
   },
-  counterTrack: {
-    flex: 1,
-    height: 4,
-    backgroundColor: Colors.surfaceElevated,
-    borderRadius: 2,
-    overflow: 'hidden',
-  },
+  counterTrack: { flex: 1, height: 4, backgroundColor: Colors.surfaceElevated, borderRadius: 2, overflow: 'hidden' },
   counterFill: { height: 4, borderRadius: 2 },
   counterRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  counterText: {
-    fontSize: FontSize.xs,
-    color: Colors.textMuted,
-    fontWeight: FontWeight.medium,
-    minWidth: 26,
-    textAlign: 'right',
-  },
+  counterText: { fontSize: FontSize.xs, color: Colors.textMuted, fontWeight: FontWeight.medium, minWidth: 26, textAlign: 'right' },
 });
