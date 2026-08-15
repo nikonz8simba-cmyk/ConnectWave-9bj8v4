@@ -133,7 +133,7 @@ async function uploadMedia(
     // Works on Android, iOS, and Web. Avoids FileSystem.uploadAsync which
     // crashes on Android with a NullPointerException in the RAW enum path.
     console.log('[uploadMedia] Fetching blob from URI...');
-    onProgress?.({ percentage: 2, uploadedBytes: 0, totalBytes });
+    onProgress?.({ percentage: 2, uploadedBytes: 0, totalBytes: 0 });
 
     const response = await fetch(asset.uri);
     const blob = await response.blob();
