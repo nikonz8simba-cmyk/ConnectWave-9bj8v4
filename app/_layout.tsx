@@ -57,6 +57,10 @@ function RootNavigator() {
           name="profile/[id]"
           options={{ headerShown: false, animation: 'slide_from_right' }}
         />
+        <Stack.Screen
+          name="hashtag/[tag]"
+          options={{ headerShown: false, animation: 'slide_from_right' }}
+        />
       </Stack>
     </>
   );
