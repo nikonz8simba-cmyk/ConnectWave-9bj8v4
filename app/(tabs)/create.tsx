@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -11,9 +11,10 @@ import {
   Alert,
   ActivityIndicator,
   Dimensions,
+  Animated,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons, MaterialIcons } from '@expo/vector-icons';
+import { Ionicons, MaterialIcons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
@@ -26,31 +27,55 @@ import { Colors, Spacing, FontSize, FontWeight, Radii } from '@/constants/theme'
 import { useRouter } from 'expo-router';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const MEDIA_HEIGHT = Math.min(SCREEN_WIDTH * 0.85, 360);
+
+// ─── Constants ────────────────────────────────────────────────────────────────
 
 const MOOD_TAGS = [
-  '🎵 Música', '📸 Fotos', '💡 Ideas', '🚀 Tech',
-  '🌊 Vibes', '❤️ Amor', '🎨 Arte', '🌍 Travel',
+  { label: '🎵 Música', id: 'music' },
+  { label: '📸 Fotos', id: 'photos' },
+  { label: '💡 Ideas', id: 'ideas' },
+  { label: '🚀 Tech', id: 'tech' },
+  { label: '🌊 Vibes', id: 'vibes' },
+  { label: '❤️ Amor', id: 'love' },
+  { label: '🎨 Arte', id: 'art' },
+  { label: '🌍 Travel', id: 'travel' },
 ];
 
 const FILTERS = [
-  { id: 'none', label: 'Original', tint: undefined },
-  { id: 'warm', label: 'Cálido', tint: 'rgba(255,180,100,0.25)' },
-  { id: 'cool', label: 'Frío', tint: 'rgba(100,160,255,0.25)' },
-  { id: 'vintage', label: 'Vintage', tint: 'rgba(180,140,100,0.3)' },
-  { id: 'fade', label: 'Fade', tint: 'rgba(200,200,200,0.3)' },
-  { id: 'drama', label: 'Drama', tint: 'rgba(40,0,80,0.3)' },
+  { id: 'none', label: 'Original', tint: null as string | null },
+  { id: 'warm', label: 'Cálido', tint: 'rgba(255,160,80,0.28)' },
+  { id: 'cool', label: 'Frío', tint: 'rgba(80,160,255,0.28)' },
+  { id: 'vintage', label: 'Vintage', tint: 'rgba(180,130,90,0.32)' },
+  { id: 'fade', label: 'Fade', tint: 'rgba(210,210,210,0.28)' },
+  { id: 'drama', label: 'Drama', tint: 'rgba(30,0,60,0.35)' },
+  { id: 'golden', label: 'Golden', tint: 'rgba(255,210,0,0.22)' },
 ];
+
+const AUDIENCE_OPTIONS = [
+  { id: 'public', label: 'Todos', icon: 'earth' as const },
+  { id: 'followers', label: 'Seguidores', icon: 'people' as const },
+  { id: 'private', label: 'Solo yo', icon: 'lock-closed' as const },
+];
+
+const MAX_CHARS = 280;
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type MediaAsset = {
   uri: string;
   type: 'image' | 'video';
-  base64?: string;
   mimeType?: string;
-  fileName?: string;
 };
 
+// ─── VideoPreview ─────────────────────────────────────────────────────────────
+
 function VideoPreview({ uri }: { uri: string }) {
-  const player = useVideoPlayer(uri, p => { p.loop = true; p.muted = true; });
+  const player = useVideoPlayer(uri, p => {
+    p.loop = true;
+    p.muted = true;
+    p.play();
+  });
   return (
     <VideoView
       player={player}
@@ -61,6 +86,8 @@ function VideoPreview({ uri }: { uri: string }) {
   );
 }
 
+// ─── Upload helper ────────────────────────────────────────────────────────────
+
 async function uploadMedia(
   asset: MediaAsset,
   userId: string
@@ -68,16 +95,16 @@ async function uploadMedia(
   try {
     const ext = asset.mimeType?.split('/')[1] ?? (asset.type === 'video' ? 'mp4' : 'jpg');
     const fileName = `${userId}/${Date.now()}.${ext}`;
+    const mimeType = asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg');
 
     if (Platform.OS === 'web') {
       const response = await fetch(asset.uri);
       const blob = await response.blob();
       const { error } = await supabase.storage
         .from('posts-media')
-        .upload(fileName, blob, { contentType: asset.mimeType ?? 'image/jpeg', upsert: false });
+        .upload(fileName, blob, { contentType: mimeType, upsert: false });
       if (error) return { url: null, error: error.message };
     } else {
-      // Mobile: use base64
       const response = await fetch(asset.uri);
       const blob = await response.blob();
       const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
@@ -88,16 +115,231 @@ async function uploadMedia(
       });
       const { error } = await supabase.storage
         .from('posts-media')
-        .upload(fileName, arrayBuffer, { contentType: asset.mimeType ?? 'image/jpeg', upsert: false });
+        .upload(fileName, arrayBuffer, { contentType: mimeType, upsert: false });
       if (error) return { url: null, error: error.message };
     }
 
     const { data } = supabase.storage.from('posts-media').getPublicUrl(fileName);
     return { url: data.publicUrl, error: null };
   } catch (e: any) {
-    return { url: null, error: e.message ?? 'Upload failed' };
+    return { url: null, error: e?.message ?? 'Upload failed' };
   }
 }
+
+// ─── CharacterRing ────────────────────────────────────────────────────────────
+
+function CharacterRing({ count, max }: { count: number; max: number }) {
+  const ratio = count / max;
+  const size = 28;
+  const strokeWidth = 3;
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const strokeDashoffset = circumference * (1 - ratio);
+  const remaining = max - count;
+
+  const color =
+    remaining < 20 ? Colors.error : remaining < 60 ? Colors.warning : Colors.primary;
+
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      {/* Background track */}
+      <View
+        style={{
+          position: 'absolute',
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          borderWidth: strokeWidth,
+          borderColor: Colors.surfaceBorder,
+        }}
+      />
+      {/* Filled arc approximation using opacity */}
+      <View
+        style={{
+          position: 'absolute',
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          borderWidth: strokeWidth,
+          borderColor: color,
+          opacity: Math.max(0.2, ratio),
+        }}
+      />
+      {remaining < 40 ? (
+        <Text style={{ fontSize: 9, color, fontWeight: FontWeight.bold }}>
+          {remaining}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
+// ─── FilterThumbnail ──────────────────────────────────────────────────────────
+
+function FilterThumbnail({
+  filter,
+  uri,
+  active,
+  onPress,
+}: {
+  filter: (typeof FILTERS)[number];
+  uri: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        filterStyles.btn,
+        active ? filterStyles.btnActive : null,
+        pressed ? { opacity: 0.8 } : null,
+      ]}
+    >
+      <View style={[filterStyles.thumb, active ? filterStyles.thumbActive : null]}>
+        <Image source={{ uri }} style={filterStyles.thumbImage} contentFit="cover" />
+        {filter.tint ? (
+          <View
+            style={[StyleSheet.absoluteFill, { backgroundColor: filter.tint, borderRadius: 8 }]}
+            pointerEvents="none"
+          />
+        ) : null}
+        {active ? (
+          <View style={filterStyles.thumbCheck}>
+            <Ionicons name="checkmark" size={10} color="#fff" />
+          </View>
+        ) : null}
+      </View>
+      <Text style={[filterStyles.label, active ? filterStyles.labelActive : null]}>
+        {filter.label}
+      </Text>
+    </Pressable>
+  );
+}
+
+const filterStyles = StyleSheet.create({
+  btn: { alignItems: 'center', gap: 5, paddingVertical: 4 },
+  btnActive: {},
+  thumb: {
+    width: 58,
+    height: 58,
+    borderRadius: 10,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  thumbActive: { borderColor: Colors.primary },
+  thumbImage: { width: '100%', height: '100%' },
+  thumbCheck: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: Colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  label: { fontSize: 10, color: Colors.textMuted, fontWeight: FontWeight.medium },
+  labelActive: { color: Colors.primary, fontWeight: FontWeight.semibold },
+});
+
+// ─── MediaPickerButtons ────────────────────────────────────────────────────────
+
+function MediaPickerButtons({
+  onCamera,
+  onGallery,
+  hasMedia,
+}: {
+  onCamera: () => void;
+  onGallery: () => void;
+  hasMedia: boolean;
+}) {
+  return (
+    <View style={pickerStyles.row}>
+      <Pressable
+        style={({ pressed }) => [pickerStyles.btn, pressed ? pickerStyles.btnPressed : null]}
+        onPress={onCamera}
+      >
+        <LinearGradient
+          colors={[Colors.primary + '22', Colors.primary + '11']}
+          style={pickerStyles.btnInner}
+        >
+          <Ionicons name="camera" size={20} color={Colors.primary} />
+          <Text style={pickerStyles.label}>Cámara</Text>
+        </LinearGradient>
+      </Pressable>
+
+      <Pressable
+        style={({ pressed }) => [pickerStyles.btn, pressed ? pickerStyles.btnPressed : null]}
+        onPress={onGallery}
+      >
+        <LinearGradient
+          colors={[Colors.secondary + '22', Colors.secondary + '11']}
+          style={pickerStyles.btnInner}
+        >
+          <Ionicons name="images" size={20} color={Colors.secondary} />
+          <Text style={[pickerStyles.label, { color: Colors.secondary }]}>Galería</Text>
+        </LinearGradient>
+      </Pressable>
+
+      <Pressable
+        style={({ pressed }) => [pickerStyles.btn, pressed ? pickerStyles.btnPressed : null]}
+        onPress={onGallery}
+      >
+        <LinearGradient
+          colors={['rgba(56,189,248,0.15)', 'rgba(56,189,248,0.07)']}
+          style={pickerStyles.btnInner}
+        >
+          <Ionicons name="videocam" size={20} color={Colors.info} />
+          <Text style={[pickerStyles.label, { color: Colors.info }]}>Video</Text>
+        </LinearGradient>
+      </Pressable>
+
+      <Pressable
+        style={({ pressed }) => [pickerStyles.btn, pressed ? pickerStyles.btnPressed : null]}
+      >
+        <LinearGradient
+          colors={['rgba(74,222,128,0.15)', 'rgba(74,222,128,0.07)']}
+          style={pickerStyles.btnInner}
+        >
+          <Ionicons name="location" size={20} color={Colors.success} />
+          <Text style={[pickerStyles.label, { color: Colors.success }]}>Lugar</Text>
+        </LinearGradient>
+      </Pressable>
+    </View>
+  );
+}
+
+const pickerStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm + 4,
+    gap: 10,
+    borderTopWidth: 1,
+    borderTopColor: Colors.surfaceBorder,
+  },
+  btn: { flex: 1, borderRadius: Radii.sm, overflow: 'hidden' },
+  btnPressed: { opacity: 0.75 },
+  btnInner: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: Spacing.sm + 2,
+    borderRadius: Radii.sm,
+    borderWidth: 1,
+    borderColor: Colors.surfaceBorder,
+  },
+  label: {
+    fontSize: FontSize.xs,
+    color: Colors.primary,
+    fontWeight: FontWeight.medium,
+  },
+});
+
+// ─── Main Screen ──────────────────────────────────────────────────────────────
 
 export default function CreateScreen() {
   const insets = useSafeAreaInsets();
@@ -109,93 +351,95 @@ export default function CreateScreen() {
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [media, setMedia] = useState<MediaAsset | null>(null);
   const [activeFilter, setActiveFilter] = useState('none');
+  const [audience, setAudience] = useState('public');
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [showAudience, setShowAudience] = useState(false);
 
-  const MAX_CHARS = 280;
+  // Animate media panel in
+  const mediaAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.spring(mediaAnim, {
+      toValue: media ? 1 : 0,
+      useNativeDriver: true,
+      tension: 60,
+      friction: 8,
+    }).start();
+  }, [media]);
+
   const remaining = MAX_CHARS - content.length;
-  const progress = content.length / MAX_CHARS;
+  const canPublish = (content.trim().length > 0 || media != null) && !loading;
 
   const handleTextChange = (text: string) => {
     if (text.length <= MAX_CHARS) setContent(text);
   };
 
-  const toggleTag = (tag: string) => {
+  const toggleTag = (id: string) => {
     setSelectedTags(prev =>
-      prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag].slice(0, 3)
+      prev.includes(id) ? prev.filter(t => t !== id) : [...prev, id].slice(0, 3)
     );
   };
 
-  const pickFromGallery = async () => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permiso requerido', 'Necesitamos acceso a tu galería para subir fotos y videos.');
-      return;
-    }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images', 'videos'],
-      allowsEditing: true,
-      quality: 0.85,
-      videoMaxDuration: 60,
-    });
-    if (!result.canceled && result.assets[0]) {
-      const asset = result.assets[0];
-      setMedia({
-        uri: asset.uri,
-        type: asset.type === 'video' ? 'video' : 'image',
-        mimeType: asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg'),
-        fileName: asset.fileName ?? undefined,
-      });
-      setActiveFilter('none');
-    }
-  };
-
-  const pickFromCamera = async () => {
-    const { status } = await ImagePicker.requestCameraPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permiso requerido', 'Necesitamos acceso a tu cámara.');
-      return;
-    }
-    const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ['images', 'videos'],
-      allowsEditing: true,
-      quality: 0.85,
-      videoMaxDuration: 60,
-    });
-    if (!result.canceled && result.assets[0]) {
-      const asset = result.assets[0];
-      setMedia({
-        uri: asset.uri,
-        type: asset.type === 'video' ? 'video' : 'image',
-        mimeType: asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg'),
-        fileName: asset.fileName ?? undefined,
-      });
-      setActiveFilter('none');
-    }
-  };
-
-  const showMediaOptions = () => {
-    Alert.alert('Agregar media', 'Elige una fuente', [
-      { text: 'Cámara', onPress: pickFromCamera },
-      { text: 'Galería', onPress: pickFromGallery },
-      { text: 'Cancelar', style: 'cancel' },
-    ]);
-  };
-
-  const removeMedia = () => {
+  const handleReset = () => {
+    setContent('');
+    setSelectedTags([]);
     setMedia(null);
     setActiveFilter('none');
+    setAudience('public');
   };
 
-  const handlePublish = useCallback(async () => {
-    if (!content.trim() && !media) {
-      Alert.alert('Oops', 'Escribe algo o agrega una foto/video antes de publicar.');
-      return;
+  const pickMedia = useCallback(async (source: 'camera' | 'gallery') => {
+    if (source === 'camera') {
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permiso requerido', 'Necesitamos acceso a tu cámara.');
+        return;
+      }
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images', 'videos'],
+        allowsEditing: true,
+        quality: 0.85,
+        videoMaxDuration: 60,
+      });
+      if (!result.canceled && result.assets[0]) {
+        const asset = result.assets[0];
+        setMedia({
+          uri: asset.uri,
+          type: asset.type === 'video' ? 'video' : 'image',
+          mimeType: asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg'),
+        });
+        setActiveFilter('none');
+      }
+    } else {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permiso requerido', 'Necesitamos acceso a tu galería.');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images', 'videos'],
+        allowsEditing: true,
+        quality: 0.85,
+        videoMaxDuration: 60,
+      });
+      if (!result.canceled && result.assets[0]) {
+        const asset = result.assets[0];
+        setMedia({
+          uri: asset.uri,
+          type: asset.type === 'video' ? 'video' : 'image',
+          mimeType: asset.mimeType ?? (asset.type === 'video' ? 'video/mp4' : 'image/jpeg'),
+        });
+        setActiveFilter('none');
+      }
     }
+  }, []);
+
+  const handlePublish = useCallback(async () => {
+    if (!canPublish) return;
     if (!profile?.id) return;
 
     setLoading(true);
-    setUploadProgress(0);
+    setUploadProgress(10);
 
     let imageUrl: string | undefined;
     let videoUrl: string | undefined;
@@ -206,10 +450,10 @@ export default function CreateScreen() {
       if (uploadError || !url) {
         setLoading(false);
         setUploadProgress(0);
-        Alert.alert('Error al subir', uploadError ?? 'Error desconocido');
+        Alert.alert('Error al subir', uploadError ?? 'Error desconocido. Intenta de nuevo.');
         return;
       }
-      setUploadProgress(80);
+      setUploadProgress(75);
       if (media.type === 'video') {
         videoUrl = url;
       } else {
@@ -218,48 +462,59 @@ export default function CreateScreen() {
     }
 
     setUploadProgress(90);
-    const { error } = await addPost(content.trim(), imageUrl, videoUrl);
+    const finalContent = [
+      content.trim(),
+      selectedTags.map(id => MOOD_TAGS.find(t => t.id === id)?.label).filter(Boolean).join(' '),
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    const { error } = await addPost(finalContent, imageUrl, videoUrl);
     setLoading(false);
     setUploadProgress(0);
 
     if (error) {
-      Alert.alert('Error', error);
+      Alert.alert('Error al publicar', error);
       return;
     }
 
-    setContent('');
-    setSelectedTags([]);
-    setMedia(null);
-    setActiveFilter('none');
-
-    Alert.alert('¡Publicado!', 'Tu post ya está en el Feed 🌊', [
-      { text: 'Ver Feed', onPress: () => router.push('/(tabs)/') },
-      { text: 'Seguir creando', style: 'cancel' },
+    Alert.alert('¡Publicado! 🌊', 'Tu post ya está en el Feed.', [
+      { text: 'Ver Feed', onPress: () => { handleReset(); router.push('/(tabs)/'); } },
+      { text: 'Nuevo post', onPress: handleReset, style: 'cancel' },
     ]);
-  }, [content, media, profile, addPost, router]);
+  }, [canPublish, profile, media, content, selectedTags, addPost, router]);
 
   const currentFilter = FILTERS.find(f => f.id === activeFilter) ?? FILTERS[0];
+  const selectedAudience = AUDIENCE_OPTIONS.find(a => a.id === audience) ?? AUDIENCE_OPTIONS[0];
 
   return (
     <KeyboardAvoidingView
       style={styles.flex}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={0}
     >
       <View style={[styles.container, { paddingTop: insets.top }]}>
-        {/* Header */}
+
+        {/* ── Header ──────────────────────────────────────────────────────── */}
         <View style={styles.header}>
           <Pressable
-            style={styles.cancelBtn}
-            onPress={() => { setContent(''); setMedia(null); }}
+            style={({ pressed }) => [styles.headerBtn, pressed ? { opacity: 0.6 } : null]}
+            onPress={handleReset}
             hitSlop={8}
           >
-            <Text style={styles.cancelText}>Limpiar</Text>
+            <Text style={styles.clearText}>Limpiar</Text>
           </Pressable>
-          <Text style={styles.title}>Nuevo Post</Text>
-          <Pressable onPress={handlePublish} disabled={(!content.trim() && !media) || loading}>
+
+          <Text style={styles.headerTitle}>Nuevo post</Text>
+
+          <Pressable
+            onPress={handlePublish}
+            disabled={!canPublish}
+            style={{ borderRadius: Radii.full, overflow: 'hidden' }}
+          >
             <LinearGradient
               colors={
-                (content.trim() || media) && !loading
+                canPublish
                   ? [Colors.primary, Colors.secondary]
                   : [Colors.surfaceElevated, Colors.surfaceElevated]
               }
@@ -270,7 +525,7 @@ export default function CreateScreen() {
               {loading ? (
                 <ActivityIndicator color="#fff" size="small" />
               ) : (
-                <Text style={[styles.publishText, (!content.trim() && !media) ? styles.publishTextDisabled : null]}>
+                <Text style={[styles.publishText, !canPublish ? styles.publishDisabled : null]}>
                   Publicar
                 </Text>
               )}
@@ -278,111 +533,238 @@ export default function CreateScreen() {
           </Pressable>
         </View>
 
-        {/* Upload progress bar */}
-        {loading && uploadProgress > 0 ? (
-          <View style={styles.progressBarWrapper}>
-            <View style={[styles.progressBarFill, { width: `${uploadProgress}%` as any }]} />
+        {/* ── Upload progress ──────────────────────────────────────────────── */}
+        {loading ? (
+          <View style={styles.progressTrack}>
+            <Animated.View
+              style={[
+                styles.progressFill,
+                { width: `${uploadProgress}%` as any },
+              ]}
+            />
           </View>
         ) : null}
 
-        <ScrollView showsVerticalScrollIndicator={false} style={styles.scroll} keyboardShouldPersistTaps="handled">
-          {/* User + Input */}
-          <View style={styles.inputArea}>
-            <Avatar uri={profile?.avatar ?? 'https://i.pravatar.cc/150?img=7'} size={44} />
-            <View style={styles.inputWrapper}>
-              <Text style={styles.userHandle}>@{profile?.username ?? 'tu'}</Text>
+        {/* ── Content scroll ──────────────────────────────────────────────── */}
+        <ScrollView
+          style={styles.scroll}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={styles.scrollContent}
+        >
+
+          {/* Author + Caption */}
+          <View style={styles.composeRow}>
+            <Avatar uri={profile?.avatar ?? 'https://i.pravatar.cc/150?img=7'} size={46} />
+
+            <View style={styles.composeRight}>
+              <View style={styles.composeTopRow}>
+                <Text style={styles.authorName}>{profile?.name ?? 'Tu nombre'}</Text>
+                {/* Audience pill */}
+                <Pressable
+                  style={styles.audiencePill}
+                  onPress={() => setShowAudience(v => !v)}
+                >
+                  <Ionicons name={selectedAudience.icon} size={12} color={Colors.primary} />
+                  <Text style={styles.audiencePillText}>{selectedAudience.label}</Text>
+                  <Ionicons name="chevron-down" size={11} color={Colors.primary} />
+                </Pressable>
+              </View>
+
+              {/* Audience picker */}
+              {showAudience ? (
+                <View style={styles.audienceMenu}>
+                  {AUDIENCE_OPTIONS.map(opt => (
+                    <Pressable
+                      key={opt.id}
+                      style={[
+                        styles.audienceMenuItem,
+                        audience === opt.id ? styles.audienceMenuItemActive : null,
+                      ]}
+                      onPress={() => { setAudience(opt.id); setShowAudience(false); }}
+                    >
+                      <Ionicons
+                        name={opt.icon}
+                        size={15}
+                        color={audience === opt.id ? Colors.primary : Colors.textMuted}
+                      />
+                      <Text
+                        style={[
+                          styles.audienceMenuText,
+                          audience === opt.id ? styles.audienceMenuTextActive : null,
+                        ]}
+                      >
+                        {opt.label}
+                      </Text>
+                      {audience === opt.id ? (
+                        <Ionicons name="checkmark" size={14} color={Colors.primary} />
+                      ) : null}
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+
               <TextInput
-                style={styles.textInput}
+                style={styles.captionInput}
                 placeholder="¿Qué está pasando en tu onda? 🌊"
                 placeholderTextColor={Colors.textMuted}
                 multiline
                 value={content}
                 onChangeText={handleTextChange}
-                autoFocus={!media}
+                autoFocus={false}
+                textAlignVertical="top"
               />
             </View>
           </View>
 
-          {/* Media Preview */}
+          {/* ── Media Preview ─────────────────────────────────────────────── */}
           {media ? (
-            <View style={styles.mediaPreviewWrapper}>
-              <View style={styles.mediaPreviewContainer}>
-                {media.type === 'image' ? (
-                  <View style={styles.mediaPreviewImageWrapper}>
-                    <Image
-                      source={{ uri: media.uri }}
-                      style={styles.mediaPreviewImage}
-                      contentFit="cover"
-                      transition={200}
-                    />
-                    {/* Filter overlay */}
-                    {currentFilter.tint ? (
-                      <View
-                        style={[
-                          StyleSheet.absoluteFill,
-                          { backgroundColor: currentFilter.tint, borderRadius: Radii.md },
-                        ]}
-                        pointerEvents="none"
+            <Animated.View
+              style={[
+                styles.mediaSection,
+                {
+                  opacity: mediaAnim,
+                  transform: [
+                    {
+                      translateY: mediaAnim.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [20, 0],
+                      }),
+                    },
+                  ],
+                },
+              ]}
+            >
+              {/* Preview card */}
+              <View style={styles.mediaCard}>
+                <View style={styles.mediaPreviewWrapper}>
+                  {media.type === 'image' ? (
+                    <>
+                      <Image
+                        source={{ uri: media.uri }}
+                        style={styles.mediaPreviewImage}
+                        contentFit="cover"
+                        transition={300}
                       />
-                    ) : null}
+                      {currentFilter.tint ? (
+                        <View
+                          style={[
+                            StyleSheet.absoluteFill,
+                            {
+                              backgroundColor: currentFilter.tint,
+                              borderRadius: Radii.md,
+                            },
+                          ]}
+                          pointerEvents="none"
+                        />
+                      ) : null}
+                    </>
+                  ) : (
+                    <VideoPreview uri={media.uri} />
+                  )}
+
+                  {/* Remove button */}
+                  <Pressable
+                    style={styles.removeBtn}
+                    onPress={() => { setMedia(null); setActiveFilter('none'); }}
+                    hitSlop={6}
+                  >
+                    <View style={styles.removeBtnInner}>
+                      <Ionicons name="close" size={14} color="#fff" />
+                    </View>
+                  </Pressable>
+
+                  {/* Media type badge */}
+                  <View style={styles.mediaBadge}>
+                    <Ionicons
+                      name={media.type === 'video' ? 'videocam' : 'image'}
+                      size={12}
+                      color="#fff"
+                    />
+                    <Text style={styles.mediaBadgeText}>
+                      {media.type === 'video' ? 'Video' : 'Foto'}
+                    </Text>
                   </View>
-                ) : (
-                  <VideoPreview uri={media.uri} />
-                )}
-                <Pressable style={styles.removeMediaBtn} onPress={removeMedia} hitSlop={8}>
-                  <Ionicons name="close-circle" size={26} color="#fff" />
-                </Pressable>
-                {media.type === 'video' ? (
-                  <View style={styles.videoLabel}>
-                    <Ionicons name="videocam" size={14} color="#fff" />
-                    <Text style={styles.videoLabelText}>Video</Text>
+
+                  {/* Change media button */}
+                  <Pressable
+                    style={styles.changeMediaBtn}
+                    onPress={() => pickMedia('gallery')}
+                  >
+                    <Ionicons name="swap-horizontal" size={14} color="#fff" />
+                    <Text style={styles.changeMediaText}>Cambiar</Text>
+                  </Pressable>
+                </View>
+
+                {/* Filters row — images only */}
+                {media.type === 'image' ? (
+                  <View style={styles.filtersSection}>
+                    <Text style={styles.filtersSectionTitle}>Filtro</Text>
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={styles.filtersRow}
+                    >
+                      {FILTERS.map(f => (
+                        <FilterThumbnail
+                          key={f.id}
+                          filter={f}
+                          uri={media.uri}
+                          active={activeFilter === f.id}
+                          onPress={() => setActiveFilter(f.id)}
+                        />
+                      ))}
+                    </ScrollView>
                   </View>
                 ) : null}
               </View>
-
-              {/* Filters row — only for images */}
-              {media.type === 'image' ? (
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.filtersRow}
+            </Animated.View>
+          ) : (
+            /* No media placeholder */
+            <Pressable
+              style={styles.mediaPlaceholder}
+              onPress={() => pickMedia('gallery')}
+            >
+              <LinearGradient
+                colors={[Colors.surfaceElevated, Colors.surface]}
+                style={styles.mediaPlaceholderInner}
+              >
+                <LinearGradient
+                  colors={[Colors.primary + '30', Colors.secondary + '20']}
+                  style={styles.placeholderIconBg}
                 >
-                  {FILTERS.map(f => (
-                    <Pressable
-                      key={f.id}
-                      style={[styles.filterBtn, activeFilter === f.id ? styles.filterBtnActive : null]}
-                      onPress={() => setActiveFilter(f.id)}
-                    >
-                      <View style={styles.filterThumb}>
-                        <Image source={{ uri: media.uri }} style={styles.filterThumbImage} contentFit="cover" />
-                        {f.tint ? (
-                          <View style={[StyleSheet.absoluteFill, { backgroundColor: f.tint, borderRadius: 8 }]} pointerEvents="none" />
-                        ) : null}
-                      </View>
-                      <Text style={[styles.filterLabel, activeFilter === f.id ? styles.filterLabelActive : null]}>
-                        {f.label}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </ScrollView>
-              ) : null}
-            </View>
-          ) : null}
+                  <Ionicons name="add-circle-outline" size={36} color={Colors.primary} />
+                </LinearGradient>
+                <Text style={styles.placeholderTitle}>Agregar foto o video</Text>
+                <Text style={styles.placeholderSub}>
+                  Toca para seleccionar desde tu galería
+                </Text>
+              </LinearGradient>
+            </Pressable>
+          )}
 
-          {/* Mood Tags */}
+          {/* ── Mood tags ─────────────────────────────────────────────────── */}
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Tema</Text>
-            <View style={styles.tagsGrid}>
+            <View style={styles.sectionHeader}>
+              <MaterialCommunityIcons name="tag-outline" size={15} color={Colors.textMuted} />
+              <Text style={styles.sectionTitle}>Etiquetas</Text>
+              <Text style={styles.sectionSubtitle}>máx. 3</Text>
+            </View>
+            <View style={styles.tagsWrap}>
               {MOOD_TAGS.map(tag => {
-                const isSelected = selectedTags.includes(tag);
+                const active = selectedTags.includes(tag.id);
                 return (
                   <Pressable
-                    key={tag}
-                    style={[styles.tag, isSelected ? styles.tagSelected : null]}
-                    onPress={() => toggleTag(tag)}
+                    key={tag.id}
+                    style={({ pressed }) => [
+                      styles.tag,
+                      active ? styles.tagActive : null,
+                      pressed ? { opacity: 0.75 } : null,
+                    ]}
+                    onPress={() => toggleTag(tag.id)}
                   >
-                    <Text style={[styles.tagText, isSelected ? styles.tagTextSelected : null]}>
-                      {tag}
+                    <Text style={[styles.tagText, active ? styles.tagTextActive : null]}>
+                      {tag.label}
                     </Text>
                   </Pressable>
                 );
@@ -390,219 +772,398 @@ export default function CreateScreen() {
             </View>
           </View>
 
-          {/* Media action buttons */}
-          <View style={styles.mediaRow}>
-            <Pressable style={styles.mediaBtn} onPress={pickFromCamera}>
-              <Ionicons name="camera-outline" size={22} color={Colors.primary} />
-              <Text style={styles.mediaBtnLabel}>Cámara</Text>
-            </Pressable>
-            <Pressable style={styles.mediaBtn} onPress={pickFromGallery}>
-              <Ionicons name="image-outline" size={22} color={Colors.primary} />
-              <Text style={styles.mediaBtnLabel}>Galería</Text>
-            </Pressable>
-            <Pressable style={styles.mediaBtn} onPress={pickFromGallery}>
-              <Ionicons name="videocam-outline" size={22} color={Colors.primary} />
-              <Text style={styles.mediaBtnLabel}>Video</Text>
-            </Pressable>
-            <Pressable style={styles.mediaBtn}>
-              <Ionicons name="at-outline" size={22} color={Colors.primary} />
-              <Text style={styles.mediaBtnLabel}>Mencionar</Text>
-            </Pressable>
-          </View>
+          {/* ── Post tips ─────────────────────────────────────────────────── */}
+          {!content.trim() && !media ? (
+            <View style={styles.tipsCard}>
+              <View style={styles.tipsRow}>
+                <Ionicons name="bulb-outline" size={15} color={Colors.warning} />
+                <Text style={styles.tipsTitle}>Tips para un gran post</Text>
+              </View>
+              <Text style={styles.tipItem}>• Agrega una imagen para más engagement</Text>
+              <Text style={styles.tipItem}>• Usa etiquetas para que te descubran</Text>
+              <Text style={styles.tipItem}>• Las primeras 2 líneas son las más leídas</Text>
+            </View>
+          ) : null}
+
+          <View style={{ height: Spacing.xxl }} />
         </ScrollView>
 
-        {/* Character counter */}
-        <View style={[styles.footer, { paddingBottom: insets.bottom + 12 }]}>
-          <View style={styles.counterBar}>
-            <View
-              style={[
-                styles.counterFill,
-                {
-                  width: `${progress * 100}%` as any,
-                  backgroundColor:
-                    remaining < 20 ? Colors.error : remaining < 60 ? Colors.warning : Colors.primary,
-                },
-              ]}
-            />
+        {/* ── Bottom toolbar ───────────────────────────────────────────────── */}
+        <View style={[styles.toolbar, { paddingBottom: insets.bottom + 4 }]}>
+          <MediaPickerButtons
+            onCamera={() => pickMedia('camera')}
+            onGallery={() => pickMedia('gallery')}
+            hasMedia={media != null}
+          />
+          {/* Character counter row */}
+          <View style={styles.counterRow}>
+            <View style={styles.counterTrack}>
+              <View
+                style={[
+                  styles.counterFill,
+                  {
+                    width: `${Math.min(100, (content.length / MAX_CHARS) * 100)}%` as any,
+                    backgroundColor:
+                      remaining < 20 ? Colors.error : remaining < 60 ? Colors.warning : Colors.primary,
+                  },
+                ]}
+              />
+            </View>
+            <View style={styles.counterRight}>
+              <CharacterRing count={content.length} max={MAX_CHARS} />
+              <Text
+                style={[
+                  styles.counterText,
+                  remaining < 20 ? { color: Colors.error } : null,
+                ]}
+              >
+                {remaining}
+              </Text>
+            </View>
           </View>
-          <Text style={[styles.counterText, remaining < 20 ? { color: Colors.error } : null]}>
-            {remaining} caracteres restantes
-          </Text>
         </View>
       </View>
     </KeyboardAvoidingView>
   );
 }
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   container: { flex: 1, backgroundColor: Colors.background },
+
+  // Header
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
+    paddingVertical: Spacing.sm + 2,
     borderBottomWidth: 1,
     borderBottomColor: Colors.surfaceBorder,
+    backgroundColor: Colors.background,
   },
-  cancelBtn: { minWidth: 70 },
-  cancelText: { color: Colors.textMuted, fontSize: FontSize.base },
-  title: { fontSize: FontSize.md, fontWeight: FontWeight.semibold, color: Colors.textPrimary },
+  headerBtn: { minWidth: 72 },
+  clearText: { color: Colors.textMuted, fontSize: FontSize.base },
+  headerTitle: {
+    fontSize: FontSize.md,
+    fontWeight: FontWeight.semibold,
+    color: Colors.textPrimary,
+  },
   publishBtn: {
-    paddingHorizontal: Spacing.md,
-    paddingVertical: 8,
-    borderRadius: Radii.full,
-    minWidth: 84,
-    alignItems: 'center',
+    paddingHorizontal: Spacing.md + 4,
     height: 38,
+    borderRadius: Radii.full,
+    alignItems: 'center',
     justifyContent: 'center',
+    minWidth: 88,
   },
-  publishText: { color: '#fff', fontWeight: FontWeight.semibold, fontSize: FontSize.base },
-  publishTextDisabled: { color: Colors.textMuted },
-  progressBarWrapper: {
+  publishText: {
+    color: '#fff',
+    fontWeight: FontWeight.semibold,
+    fontSize: FontSize.base,
+  },
+  publishDisabled: { color: Colors.textMuted },
+
+  // Progress
+  progressTrack: {
     height: 3,
     backgroundColor: Colors.surfaceElevated,
     overflow: 'hidden',
   },
-  progressBarFill: {
+  progressFill: {
     height: 3,
     backgroundColor: Colors.primary,
     borderRadius: 2,
   },
+
+  // Scroll
   scroll: { flex: 1 },
-  inputArea: {
+  scrollContent: { paddingBottom: Spacing.md },
+
+  // Compose row
+  composeRow: {
     flexDirection: 'row',
-    padding: Spacing.md,
-    gap: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+    gap: Spacing.sm + 4,
     borderBottomWidth: 1,
     borderBottomColor: Colors.surfaceBorder,
   },
-  inputWrapper: { flex: 1, gap: 6 },
-  userHandle: { color: Colors.primaryLight, fontSize: FontSize.sm, fontWeight: FontWeight.medium },
-  textInput: {
+  composeRight: { flex: 1, gap: 8 },
+  composeTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  authorName: {
+    fontSize: FontSize.base,
+    fontWeight: FontWeight.semibold,
+    color: Colors.textPrimary,
+  },
+
+  // Audience pill
+  audiencePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: Radii.full,
+    backgroundColor: Colors.primary + '18',
+    borderWidth: 1,
+    borderColor: Colors.primary + '40',
+  },
+  audiencePillText: {
+    fontSize: FontSize.xs,
+    color: Colors.primary,
+    fontWeight: FontWeight.semibold,
+  },
+
+  // Audience dropdown
+  audienceMenu: {
+    backgroundColor: Colors.surfaceElevated,
+    borderRadius: Radii.md,
+    borderWidth: 1,
+    borderColor: Colors.surfaceBorder,
+    overflow: 'hidden',
+    marginBottom: 4,
+  },
+  audienceMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.surfaceBorder,
+  },
+  audienceMenuItemActive: { backgroundColor: Colors.primary + '10' },
+  audienceMenuText: { flex: 1, fontSize: FontSize.sm, color: Colors.textSecondary },
+  audienceMenuTextActive: { color: Colors.primary, fontWeight: FontWeight.semibold },
+
+  // Caption input
+  captionInput: {
     color: Colors.textPrimary,
     fontSize: FontSize.md,
     lineHeight: 26,
-    minHeight: 100,
+    minHeight: 90,
     textAlignVertical: 'top',
   },
-  mediaPreviewWrapper: {
-    marginHorizontal: Spacing.md,
-    marginVertical: Spacing.sm,
+
+  // Media section
+  mediaSection: {
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
   },
-  mediaPreviewContainer: {
-    position: 'relative',
-    borderRadius: Radii.md,
+  mediaCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radii.lg,
+    borderWidth: 1,
+    borderColor: Colors.surfaceBorder,
     overflow: 'hidden',
-    backgroundColor: Colors.surfaceElevated,
   },
-  mediaPreviewImageWrapper: {
+  mediaPreviewWrapper: {
     position: 'relative',
+    backgroundColor: Colors.surfaceElevated,
   },
   mediaPreviewImage: {
     width: '100%',
-    height: SCREEN_WIDTH - Spacing.md * 2 - Spacing.md,
-    maxHeight: 360,
-    borderRadius: Radii.md,
+    height: MEDIA_HEIGHT,
   },
-  removeMediaBtn: {
+
+  // Overlay controls
+  removeBtn: {
     position: 'absolute',
     top: 10,
     right: 10,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    borderRadius: 14,
   },
-  videoLabel: {
+  removeBtnInner: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  mediaBadge: {
     position: 'absolute',
     bottom: 10,
     left: 10,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: 'rgba(0,0,0,0.65)',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: Radii.sm,
   },
-  videoLabelText: { color: '#fff', fontSize: FontSize.xs, fontWeight: FontWeight.semibold },
-  filtersRow: {
-    paddingVertical: Spacing.sm,
-    paddingHorizontal: 4,
-    gap: 12,
+  mediaBadgeText: { color: '#fff', fontSize: FontSize.xs, fontWeight: FontWeight.semibold },
+  changeMediaBtn: {
+    position: 'absolute',
+    bottom: 10,
+    right: 10,
     flexDirection: 'row',
-  },
-  filterBtn: {
     alignItems: 'center',
     gap: 4,
-    opacity: 0.75,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: Radii.sm,
   },
-  filterBtnActive: {
-    opacity: 1,
+  changeMediaText: { color: '#fff', fontSize: FontSize.xs, fontWeight: FontWeight.medium },
+
+  // Filters
+  filtersSection: {
+    paddingHorizontal: Spacing.sm,
+    paddingTop: Spacing.sm,
+    paddingBottom: Spacing.xs,
   },
-  filterThumb: {
-    width: 56,
-    height: 56,
-    borderRadius: 8,
-    overflow: 'hidden',
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  filterThumbImage: { width: '100%', height: '100%' },
-  filterLabel: {
-    fontSize: 10,
-    color: Colors.textMuted,
-    fontWeight: FontWeight.medium,
-  },
-  filterLabelActive: {
-    color: Colors.primary,
+  filtersSectionTitle: {
+    fontSize: FontSize.xs,
     fontWeight: FontWeight.semibold,
-  },
-  section: { padding: Spacing.md, borderBottomWidth: 1, borderBottomColor: Colors.surfaceBorder },
-  sectionTitle: {
     color: Colors.textMuted,
-    fontSize: FontSize.sm,
-    fontWeight: FontWeight.semibold,
     textTransform: 'uppercase',
     letterSpacing: 1,
+    paddingHorizontal: 4,
+    marginBottom: Spacing.xs,
+  },
+  filtersRow: {
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 4,
+    paddingBottom: Spacing.sm,
+  },
+
+  // Media placeholder
+  mediaPlaceholder: {
+    marginHorizontal: Spacing.md,
+    marginVertical: Spacing.sm,
+    borderRadius: Radii.lg,
+    overflow: 'hidden',
+    borderWidth: 1.5,
+    borderColor: Colors.surfaceBorder,
+    borderStyle: 'dashed',
+  },
+  mediaPlaceholderInner: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.xl,
+    gap: Spacing.sm,
+  },
+  placeholderIconBg: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Spacing.xs,
+  },
+  placeholderTitle: {
+    fontSize: FontSize.md,
+    fontWeight: FontWeight.semibold,
+    color: Colors.textSecondary,
+  },
+  placeholderSub: {
+    fontSize: FontSize.sm,
+    color: Colors.textMuted,
+    textAlign: 'center',
+  },
+
+  // Tags section
+  section: {
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: Colors.surfaceBorder,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     marginBottom: Spacing.sm,
   },
-  tagsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  sectionTitle: {
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.semibold,
+    color: Colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    flex: 1,
+  },
+  sectionSubtitle: {
+    fontSize: FontSize.xs,
+    color: Colors.textMuted,
+  },
+  tagsWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   tag: {
-    paddingHorizontal: Spacing.sm + 4,
+    paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: Radii.full,
     backgroundColor: Colors.surfaceElevated,
     borderWidth: 1,
     borderColor: Colors.surfaceBorder,
   },
-  tagSelected: { backgroundColor: Colors.primary + '33', borderColor: Colors.primary },
-  tagText: { color: Colors.textSecondary, fontSize: FontSize.sm, fontWeight: FontWeight.medium },
-  tagTextSelected: { color: Colors.primary },
-  mediaRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
+  tagActive: {
+    backgroundColor: Colors.primary + '25',
+    borderColor: Colors.primary,
+  },
+  tagText: {
+    fontSize: FontSize.sm,
+    color: Colors.textSecondary,
+    fontWeight: FontWeight.medium,
+  },
+  tagTextActive: { color: Colors.primaryLight },
+
+  // Tips
+  tipsCard: {
+    marginHorizontal: Spacing.md,
+    marginTop: Spacing.xs,
     padding: Spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.surfaceBorder,
-  },
-  mediaBtn: {
-    alignItems: 'center',
-    gap: 4,
-    padding: Spacing.sm,
-    minWidth: 60,
-    minHeight: 60,
-    justifyContent: 'center',
-  },
-  mediaBtnLabel: { color: Colors.textMuted, fontSize: FontSize.xs },
-  footer: {
-    paddingHorizontal: Spacing.md,
-    paddingTop: Spacing.sm,
-    borderTopWidth: 1,
-    borderTopColor: Colors.surfaceBorder,
+    backgroundColor: Colors.surface,
+    borderRadius: Radii.md,
+    borderWidth: 1,
+    borderColor: Colors.surfaceBorder,
     gap: 6,
   },
-  counterBar: { height: 3, backgroundColor: Colors.surfaceElevated, borderRadius: 2, overflow: 'hidden' },
-  counterFill: { height: 3, borderRadius: 2 },
-  counterText: { color: Colors.textMuted, fontSize: FontSize.xs, textAlign: 'right' },
+  tipsRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 },
+  tipsTitle: {
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.semibold,
+    color: Colors.textSecondary,
+  },
+  tipItem: { fontSize: FontSize.sm, color: Colors.textMuted, lineHeight: 20 },
+
+  // Bottom toolbar
+  toolbar: {
+    backgroundColor: Colors.background,
+    borderTopWidth: 1,
+    borderTopColor: Colors.surfaceBorder,
+  },
+  counterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.md,
+    paddingBottom: Spacing.sm,
+    gap: Spacing.sm,
+  },
+  counterTrack: {
+    flex: 1,
+    height: 4,
+    backgroundColor: Colors.surfaceElevated,
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  counterFill: { height: 4, borderRadius: 2 },
+  counterRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  counterText: {
+    fontSize: FontSize.xs,
+    color: Colors.textMuted,
+    fontWeight: FontWeight.medium,
+    minWidth: 26,
+    textAlign: 'right',
+  },
 });
