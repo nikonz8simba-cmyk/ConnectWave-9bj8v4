@@ -10,7 +10,6 @@ import {
   TextInput,
   Alert,
   ActivityIndicator,
-  Platform,
   Dimensions,
   RefreshControl,
 } from 'react-native';
@@ -46,30 +45,41 @@ function formatStat(n: number): string {
 async function uploadAvatar(uri: string, userId: string): Promise<string | null> {
   try {
     const fileName = `${userId}/avatar_${Date.now()}.jpg`;
+
+    // Universal path: fetch → blob → XHR.
+    // Avoids FileReader + ArrayBuffer which silently fails on Android
+    // (same root cause as the video upload regression in create.tsx).
     const response = await fetch(uri);
     const blob = await response.blob();
 
-    if (Platform.OS === 'web') {
-      const { error } = await supabase.storage
-        .from('avatars')
-        .upload(fileName, blob, { contentType: 'image/jpeg', upsert: true });
-      if (error) return null;
-    } else {
-      const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as ArrayBuffer);
-        reader.onerror = reject;
-        reader.readAsArrayBuffer(blob);
-      });
-      const { error } = await supabase.storage
-        .from('avatars')
-        .upload(fileName, arrayBuffer, { contentType: 'image/jpeg', upsert: true });
-      if (error) return null;
-    }
+    const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
+    const { data: { session } } = await supabase.auth.getSession();
+    const authToken = session?.access_token ?? (process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '');
+    const storageUrl = `${supabaseUrl}/storage/v1/object/avatars/${fileName}`;
+
+    await new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+        } else {
+          console.error('[uploadAvatar] XHR error:', xhr.status, xhr.responseText);
+          reject(new Error(`Avatar upload failed (${xhr.status}): ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error('XHR network error during avatar upload'));
+      xhr.open('POST', storageUrl);
+      xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+      xhr.setRequestHeader('Content-Type', 'image/jpeg');
+      xhr.setRequestHeader('x-upsert', 'true');
+      xhr.send(blob);
+    });
 
     const { data } = supabase.storage.from('avatars').getPublicUrl(fileName);
+    // Cache-bust so expo-image reloads the new avatar immediately
     return `${data.publicUrl}?t=${Date.now()}`;
-  } catch {
+  } catch (e: any) {
+    console.error('[uploadAvatar] Exception:', e?.message);
     return null;
   }
 }
