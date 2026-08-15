@@ -21,6 +21,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import * as Location from 'expo-location';
 import { compressVideo } from '@/services/videoCompressor';
+import * as ImageManipulator from 'expo-image-manipulator';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { Avatar } from '@/components/ui/Avatar';
 import { MentionInput } from '@/components/ui/MentionInput';
@@ -86,7 +87,7 @@ type UploadProgressInfo = {
   totalBytes: number;
 };
 
-type PublishPhase = 'idle' | 'compressing' | 'uploading' | 'saving';
+type PublishPhase = 'idle' | 'optimizing' | 'compressing' | 'uploading' | 'saving';
 
 // ─── VideoPreview ─────────────────────────────────────────────────────────────
 // Uses expo-video with a static thumbnail fallback for content:// URIs on Android
@@ -169,6 +170,34 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Compress an image to max 1920px wide, JPEG at 85% quality.
+ * Returns the optimised file:// URI from the app cache.
+ */
+async function optimizeImage(
+  uri: string,
+  onProgress?: (progress: number) => void
+): Promise<string> {
+  try {
+    onProgress?.(10);
+    const result = await ImageManipulator.manipulateAsync(
+      uri,
+      [{ resize: { width: 1920 } }],
+      {
+        compress: 0.85,
+        format: ImageManipulator.SaveFormat.JPEG,
+      }
+    );
+    onProgress?.(100);
+    console.log('[optimizeImage] Optimised URI:', result.uri);
+    return result.uri;
+  } catch (err: any) {
+    console.warn('[optimizeImage] Failed, using original:', err?.message);
+    onProgress?.(100);
+    return uri;
+  }
 }
 
 /**
@@ -370,11 +399,15 @@ async function uploadMedia(
 
 function PublishProgressBar({
   phase,
+  mediaType,
+  optimizeProgress,
   compressProgress,
   uploadProgress,
   uploadInfo,
 }: {
   phase: PublishPhase;
+  mediaType: 'image' | 'video';
+  optimizeProgress: number;
   compressProgress: number;
   uploadProgress: number;
   uploadInfo: UploadProgressInfo | null;
@@ -382,11 +415,13 @@ function PublishProgressBar({
   const fillAnim = useRef(new Animated.Value(0)).current;
 
   // Map phase + progress → a single 0-100 value across the whole publish flow:
-  //   compressing → 0-45%   uploading → 45-95%   saving → 95-100%
+  //   optimizing/compressing → 0-45%   uploading → 45-95%   saving → 95-100%
+  const firstPhaseProgress = mediaType === 'image' ? optimizeProgress : compressProgress;
   const overallProgress =
-    phase === 'compressing' ? Math.round(compressProgress * 0.45)
-    : phase === 'uploading'  ? Math.round(45 + uploadProgress * 0.50)
-    : phase === 'saving'     ? 98
+    phase === 'optimizing'  ? Math.round(firstPhaseProgress * 0.45)
+    : phase === 'compressing' ? Math.round(firstPhaseProgress * 0.45)
+    : phase === 'uploading'   ? Math.round(45 + uploadProgress * 0.50)
+    : phase === 'saving'      ? 98
     : 100;
 
   useEffect(() => {
@@ -405,14 +440,16 @@ function PublishProgressBar({
   });
 
   const barColor =
-    phase === 'compressing' ? Colors.warning
-    : phase === 'uploading'  ? Colors.info
+    phase === 'optimizing'  ? Colors.success
+    : phase === 'compressing' ? Colors.warning
+    : phase === 'uploading'   ? Colors.info
     : Colors.primary;
 
   const label =
-    phase === 'compressing' ? `Comprimiendo video... ${compressProgress}%`
-    : phase === 'uploading'  ? (uploadProgress < 100 ? 'Subiendo...' : 'Procesando...')
-    : phase === 'saving'     ? 'Guardando post...'
+    phase === 'optimizing'  ? `Optimizando imagen... ${optimizeProgress}%`
+    : phase === 'compressing' ? `Comprimiendo video... ${compressProgress}%`
+    : phase === 'uploading'   ? (uploadProgress < 100 ? 'Subiendo...' : 'Procesando...')
+    : phase === 'saving'      ? 'Guardando post...'
     : 'Publicando...';
 
   return (
@@ -443,14 +480,22 @@ function PublishProgressBar({
       </View>
       {/* Phase indicators */}
       <View style={progressStyles.phaseRow}>
-        {(['compressing', 'uploading', 'saving'] as PublishPhase[]).map((p, i) => {
-          const phases: PublishPhase[] = ['compressing', 'uploading', 'saving'];
+        {(
+          mediaType === 'image'
+            ? (['optimizing', 'uploading', 'saving'] as PublishPhase[])
+            : (['compressing', 'uploading', 'saving'] as PublishPhase[])
+        ).map((p, i) => {
+          const phases: PublishPhase[] = mediaType === 'image'
+            ? ['optimizing', 'uploading', 'saving']
+            : ['compressing', 'uploading', 'saving'];
           const phaseIdx = phases.indexOf(phase);
           const isActive = p === phase;
           const isDone = phases.indexOf(p) < phaseIdx ||
             (phase === 'saving' && p !== 'saving');
           const phaseColor = isDone ? Colors.success : isActive ? barColor : Colors.surfaceBorder;
-          const phaseLabels = ['Comprimir', 'Subir', 'Guardar'];
+          const phaseLabels = mediaType === 'image'
+            ? ['Optimizar', 'Subir', 'Guardar']
+            : ['Comprimir', 'Subir', 'Guardar'];
           return (
             <View key={p} style={progressStyles.phaseItem}>
               <View style={[progressStyles.phaseDot, { backgroundColor: phaseColor }]}>
@@ -745,6 +790,7 @@ export default function CreateScreen() {
   const [locationLoading, setLocationLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [publishPhase, setPublishPhase] = useState<PublishPhase>('idle');
+  const [optimizeProgress, setOptimizeProgress] = useState(0);
   const [compressProgress, setCompressProgress] = useState(0);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadProgressInfo, setUploadProgressInfo] = useState<UploadProgressInfo | null>(null);
@@ -782,6 +828,7 @@ export default function CreateScreen() {
     setAudience('public');
     setLocation(null);
     setPublishPhase('idle');
+    setOptimizeProgress(0);
     setCompressProgress(0);
     setUploadProgress(0);
     setUploadProgressInfo(null);
@@ -925,6 +972,7 @@ export default function CreateScreen() {
 
     setLoading(true);
     setPublishPhase('idle');
+    setOptimizeProgress(0);
     setCompressProgress(0);
     setUploadProgress(0);
     setUploadProgressInfo(null);
@@ -935,7 +983,30 @@ export default function CreateScreen() {
     if (media) {
       let uploadAsset = media;
 
-      // ── Step 1: Compress video before upload ─────────────────────────
+      // ── Step 1a: Optimise image before upload ────────────────────────
+      if (media.type === 'image') {
+        setPublishPhase('optimizing');
+        setOptimizeProgress(0);
+        try {
+          console.log('[handlePublish] Starting image optimisation...');
+          const optimisedUri = await optimizeImage(
+            media.uri,
+            (progress) => setOptimizeProgress(progress)
+          );
+          console.log('[handlePublish] Optimisation done:', optimisedUri);
+          uploadAsset = {
+            uri: optimisedUri,
+            type: 'image',
+            mimeType: 'image/jpeg',
+            thumbnailUri: media.thumbnailUri,
+          };
+        } catch (optErr: any) {
+          console.warn('[handlePublish] Optimisation failed, uploading original:', optErr?.message);
+          uploadAsset = { ...media, mimeType: 'image/jpeg' };
+        }
+      }
+
+      // ── Step 1b: Compress video before upload ─────────────────────────
       if (media.type === 'video') {
         setPublishPhase('compressing');
         setCompressProgress(0);
@@ -963,6 +1034,7 @@ export default function CreateScreen() {
         }
       }
 
+
       // ── Step 2: Upload to Supabase Storage ───────────────────────────
       setPublishPhase('uploading');
       const { url, error: uploadError } = await uploadMedia(
@@ -980,6 +1052,7 @@ export default function CreateScreen() {
         setUploadProgress(0);
         setUploadProgressInfo(null);
         Alert.alert('Error al subir', uploadError ?? 'Error desconocido. Intenta de nuevo.');
+        setOptimizeProgress(0);
         return;
       }
       if (media.type === 'video') {
@@ -990,6 +1063,7 @@ export default function CreateScreen() {
     }
 
     setPublishPhase('saving');
+    setOptimizeProgress(0);
     setUploadProgress(100);
 
     // Build final content: caption + mood tags + optional location footer
@@ -1074,6 +1148,8 @@ export default function CreateScreen() {
         {loading ? (
           <PublishProgressBar
             phase={publishPhase}
+            mediaType={media?.type ?? 'image'}
+            optimizeProgress={optimizeProgress}
             compressProgress={compressProgress}
             uploadProgress={uploadProgress}
             uploadInfo={uploadProgressInfo}
