@@ -100,6 +100,24 @@ export interface AppMessage {
   media_type?: string;
 }
 
+export interface DbComment {
+  id: string;
+  post_id: string;
+  user_id: string;
+  content: string;
+  created_at: string;
+  user_profiles?: DbUserProfile;
+}
+
+export interface AppComment {
+  id: string;
+  post_id: string;
+  user: AppUser;
+  content: string;
+  created_at: string;
+  timestamp: string;
+}
+
 export interface AppConversation {
   id: string;
   other_user: AppUser;

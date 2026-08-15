@@ -4,6 +4,7 @@ import { Image } from 'expo-image';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import { Avatar } from '@/components/ui/Avatar';
+import { CommentsBottomSheet } from '@/components/feature/CommentsBottomSheet';
 import { Colors, Spacing, Radii, FontSize, FontWeight, Shadows } from '@/constants/theme';
 import { AppPost } from '@/types/database';
 
@@ -56,7 +57,8 @@ function VideoPost({ uri }: { uri: string }) {
 // ─────────────────────────────────────────────
 export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardProps) {
   const [scale] = useState(new Animated.Value(1));
-  const [commentExpanded, setCommentExpanded] = useState(false);
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  const [localCommentsCount, setLocalCommentsCount] = useState(post.comments_count);
 
   const handleLike = useCallback(() => {
     Animated.sequence([
@@ -65,6 +67,10 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
     ]).start();
     onLike(post.id);
   }, [onLike, post.id, scale]);
+
+  const handleCommentCountChange = useCallback((delta: number) => {
+    setLocalCommentsCount(prev => Math.max(0, prev + delta));
+  }, []);
 
   return (
     <View style={styles.card}>
@@ -119,13 +125,17 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
           </Text>
         </Pressable>
 
-        <Pressable style={styles.actionBtn} onPress={() => setCommentExpanded(v => !v)} hitSlop={8}>
+        <Pressable
+          style={styles.actionBtn}
+          onPress={() => setCommentsOpen(true)}
+          hitSlop={8}
+        >
           <Ionicons
-            name={commentExpanded ? 'chatbubble' : 'chatbubble-outline'}
+            name={commentsOpen ? 'chatbubble' : 'chatbubble-outline'}
             size={20}
-            color={commentExpanded ? Colors.primary : Colors.textSecondary}
+            color={commentsOpen ? Colors.primary : Colors.textSecondary}
           />
-          <Text style={styles.actionCount}>{formatCount(post.comments_count)}</Text>
+          <Text style={styles.actionCount}>{formatCount(localCommentsCount)}</Text>
         </Pressable>
 
         <Pressable style={styles.actionBtn} hitSlop={8}>
@@ -138,12 +148,14 @@ export const PostCard = React.memo(function PostCard({ post, onLike }: PostCardP
         </Pressable>
       </View>
 
-      {/* Comment box */}
-      {commentExpanded ? (
-        <View style={styles.commentBox}>
-          <Text style={styles.commentPlaceholder}>Se el primero en comentar... 💬</Text>
-        </View>
-      ) : null}
+      {/* Comments bottom sheet */}
+      <CommentsBottomSheet
+        visible={commentsOpen}
+        postId={post.id}
+        commentsCount={localCommentsCount}
+        onClose={() => setCommentsOpen(false)}
+        onCountChange={handleCommentCountChange}
+      />
     </View>
   );
 });
@@ -214,11 +226,4 @@ const styles = StyleSheet.create({
     fontWeight: FontWeight.medium,
   },
   likedCount: { color: Colors.secondary },
-  commentBox: {
-    marginTop: Spacing.sm,
-    padding: Spacing.sm,
-    backgroundColor: Colors.surfaceElevated,
-    borderRadius: Radii.sm,
-  },
-  commentPlaceholder: { color: Colors.textMuted, fontSize: FontSize.sm },
 });
